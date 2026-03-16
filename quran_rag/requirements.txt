@@ -1,0 +1,39 @@
+# ============================================================
+# YaqeenAI — Quran RAG System Dependencies
+# ============================================================
+
+# --- Web Framework ---
+fastapi==0.115.6
+uvicorn[standard]==0.34.0
+httpx==0.28.1
+
+# --- Embedding & Reranking ---
+sentence-transformers==3.4.1
+torch>=2.1.0
+transformers>=4.40.0
+google-genai>=1.11.0
+
+# --- Vector Database ---
+chromadb>=0.5.20
+
+# --- BM25 Sparse Retrieval ---
+rank-bm25==0.2.2
+
+# --- Arabic NLP ---
+camel-tools==1.5.5
+pyarabic==0.6.15
+
+# --- Data Processing ---
+numpy>=1.24.0
+pydantic==2.10.5
+pydantic-settings==2.7.1
+
+# --- Logging & Utilities ---
+loguru==0.7.3
+tenacity==9.0.0
+tqdm==4.67.1
+python-dotenv==1.0.1
+
+# --- Testing ---
+pytest==8.3.4
+pytest-asyncio==0.25.0
