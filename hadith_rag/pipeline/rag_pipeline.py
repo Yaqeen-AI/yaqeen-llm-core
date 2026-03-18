@@ -80,6 +80,11 @@ class RAGResponse:
     generation: Optional[GeneratedResponse] = None
     timing: dict = field(default_factory=dict)
     query_type: str = "general"  # For API consumers to know how the query was handled
+    answer_intent: str = ""
+    evidence_sufficient: bool = False
+    authenticity_of_evidence: str = "insufficient"
+    relevance_to_question: str = "weak"
+    final_sufficiency: str = "insufficient"
 
     def __str__(self) -> str:
         header = f"📖 سؤال: {self.query}\n{'=' * 60}\n"
@@ -111,7 +116,13 @@ class RAGResponse:
             "query": self.query,
             "answer": self.answer,
             "query_type": self.query_type,
+            "answer_intent": self.answer_intent,
+            "evidence_sufficient": self.evidence_sufficient,
+            "authenticity_of_evidence": self.authenticity_of_evidence,
+            "relevance_to_question": self.relevance_to_question,
+            "final_sufficiency": self.final_sufficiency,
             "citations": self.generation.to_dict()["citations"] if self.generation else [],
+            "ignored_narrations": self.generation.to_dict()["ignored_narrations"] if self.generation else [],
             "warnings": self.generation.warnings if self.generation else [],
             "grounding_verified": self.generation.grounding_verified if self.generation else False,
             "hadiths": [
@@ -211,6 +222,8 @@ class HadithRAGPipeline:
                 answer=processed.direct_response,
                 timing=timing,
                 query_type="greeting",
+                answer_intent="",
+                evidence_sufficient=False,
             )
 
         # ── Early exit: Out of scope ──
@@ -222,6 +235,8 @@ class HadithRAGPipeline:
                 answer=processed.direct_response,
                 timing=timing,
                 query_type="out_of_scope",
+                answer_intent="",
+                evidence_sufficient=False,
             )
 
         # ── Early exit: Dataset statistics ──
@@ -233,6 +248,8 @@ class HadithRAGPipeline:
                 answer=processed.direct_response,
                 timing=timing,
                 query_type="dataset_stats",
+                answer_intent="",
+                evidence_sufficient=False,
             )
 
         # ──────────────────────────────────────────────
@@ -253,14 +270,37 @@ class HadithRAGPipeline:
         timing["hybrid_retrieval"] = time.time() - t0
         timing.update({f"retrieval_{k}": v for k, v in hybrid_result.timing.items()})
 
+        gen_query_type = "general"
+        if processed.query_type == QueryType.METADATA:
+            gen_query_type = "metadata"
+        elif processed.query_type == QueryType.NARRATOR:
+            gen_query_type = "narrator"
+        elif processed.query_type == QueryType.EXPLAIN_HADITH:
+            gen_query_type = "explain_hadith"
+
         if not retrieved_hadiths:
             logger.warning("No hadiths retrieved")
+            generation = self.generator.generate(
+                query=user_query,
+                hadiths=[],
+                temperature=temperature,
+                verify_grounding=True,
+                query_type=gen_query_type,
+                metadata_fields=processed.metadata_fields if processed.metadata_fields else None,
+                excluded_masdar=processed.excluded_masdar if processed.excluded_masdar else None,
+            )
             timing["total"] = time.time() - total_start
             return RAGResponse(
                 query=user_query,
-                answer="لم أجد أحاديث متعلقة بسؤالك في قاعدة البيانات.",
+                answer=generation.answer,
+                generation=generation,
                 timing=timing,
-                query_type=processed.query_type.value,
+                query_type=gen_query_type,
+                answer_intent=generation.answer_intent,
+                evidence_sufficient=generation.evidence_sufficient,
+                authenticity_of_evidence=generation.authenticity_of_evidence,
+                relevance_to_question=generation.relevance_to_question,
+                final_sufficiency=generation.final_sufficiency,
             )
 
         # ──────────────────────────────────────────────
@@ -281,15 +321,6 @@ class HadithRAGPipeline:
         # Query-type-aware: passes query_type and metadata_fields to generator
         # ──────────────────────────────────────────────
         t0 = time.time()
-
-        # Map QueryType to generator query_type string
-        gen_query_type = "general"
-        if processed.query_type == QueryType.METADATA:
-            gen_query_type = "metadata"
-        elif processed.query_type == QueryType.NARRATOR:
-            gen_query_type = "narrator"
-        elif processed.query_type == QueryType.EXPLAIN_HADITH:
-            gen_query_type = "explain_hadith"
 
         logger.info(
             f"Stage 5: Generating answer from {len(reranked_hadiths)} hadiths "
@@ -322,6 +353,11 @@ class HadithRAGPipeline:
             generation=generation,
             timing=timing,
             query_type=gen_query_type,
+            answer_intent=generation.answer_intent,
+            evidence_sufficient=generation.evidence_sufficient,
+            authenticity_of_evidence=generation.authenticity_of_evidence,
+            relevance_to_question=generation.relevance_to_question,
+            final_sufficiency=generation.final_sufficiency,
         )
 
 

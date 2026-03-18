@@ -22,7 +22,13 @@ from dataclasses import dataclass, field, asdict
 from google import genai
 from google.genai import types
 
-from pipeline.config import settings, resolve_grade_label
+from pipeline.answer_policy import AnswerIntent, classify_answer_intent, grade_priority
+from pipeline.config import (
+    audit_grade,
+    resolve_grade_bucket,
+    resolve_grade_label,
+    settings,
+)
 from pipeline.retrieve import RetrievedHadith
 
 logger = logging.getLogger(__name__)
@@ -150,6 +156,72 @@ SYSTEM_PROMPT_EXPLAIN = """أنت عالم متخصص في الحديث النب
 6. **اللغة**: أجب باللغة العربية الفصحى."""
 
 
+SYSTEM_PROMPT_GENERAL_EXPLANATION_FALLBACK = """أنت مساعد إسلامي يجيب عن سؤال تفسيري عندما تكون الأحاديث المسترجعة غير كافية أو غير مرتبطة مباشرة بالسؤال.
+
+## قواعد صارمة:
+1. لا تذكر أي حديث أو أثر أو نسبة إلى النبي صلى الله عليه وسلم ما لم يكن موجوداً في النتائج المسترجعة.
+2. اشرح المعنى العام فقط اعتماداً على مبادئ إسلامية معروفة بصياغة عامة، من غير اقتباس نصوص حديثية.
+3. ابدأ بالتنبيه المختصر إلى أن الأحاديث المسترجعة غير كافية أو غير مرتبطة مباشرة بالسؤال.
+4. بعد ذلك قدّم شرحاً عاماً نافعاً وصادقاً ومباشراً للسؤال.
+5. لا تقل "لم يُعثر على هذا الحديث" إلا إذا كان السؤال فعلاً عن حديث بعينه.
+6. لا تختلق مصادر، ولا أرقام، ولا رواة، ولا نصوصاً من عندك.
+7. أجب بالعربية الفصحى."""
+
+
+INTENT_AR_LABELS = {
+    AnswerIntent.EXPLANATORY: "إجابة تفسيرية أو تعليمية",
+    AnswerIntent.VERIFICATION: "تحقق من صحة الحديث أو درجته",
+    AnswerIntent.COLLECTION: "جمع شامل للروايات",
+    AnswerIntent.LOOKUP: "بحث عن حديث بعينه",
+}
+
+
+def _build_intent_policy_prompt(answer_intent: AnswerIntent) -> str:
+    """Return strict rules tailored to the classified answer intent."""
+    common_rules = """
+## قواعد الدرجات الملزمة:
+1. اذكر درجة كل رواية تذكرها صراحة.
+2. قدّم الصحيح ثم الحسن قبل غيرهما كلما أمكن.
+3. الرواية الضعيفة أو الموضوعة أو غير المتحققة لا تُبنى عليها أحكام ولا فضائل ولا توجيه ديني.
+4. إذا كانت درجة الرواية غير واضحة فعدّها «غير متحققة» ولا تستخدمها دليلاً.
+5. إذا تعارضت الدرجة المختصرة مع الحكم التفصيلي فاعتبر الرواية غير صالحة للاحتجاج.
+6. لا تستعمل روايات أحكام الزكاة وتوزيعها لإثبات فضائل الصدقة إلا إذا كان وجه الاستدلال صريحاً في السياق.
+7. اكتب متن الجواب فقط؛ قسم كفاية الأدلة وقسم الروايات المستبعدة سيُضافان خارجياً.
+"""
+
+    if answer_intent == AnswerIntent.EXPLANATORY:
+        return common_rules + """
+## سياسة الإجابة التفسيرية:
+1. استعمل في الاستدلال فقط الأحاديث الصحيحة والحسنة.
+2. إذا وُجدت روايات ضعيفة أو موضوعة أو غير متحققة ذات صلة، فاذكرها فقط بوصفها غير صالحة للاحتجاج.
+3. إذا لم يوجد في السياق حديث صحيح أو حسن أو كانت النتائج غير مرتبطة مباشرة بالسؤال، فاذكر ذلك بوضوح ثم قدّم شرحاً عاماً بلا أحاديث مخترعة.
+4. لا تقل "لم يُعثر على هذا الحديث" في الأسئلة التفسيرية العامة مثل الفضائل والفوائد والشرح العام.
+"""
+
+    if answer_intent == AnswerIntent.VERIFICATION:
+        return common_rules + """
+## سياسة التحقق من الحديث:
+1. اذكر درجة الحديث أولاً قبل أي شرح لمعناه.
+2. يجوز ذكر الضعيف أو الموضوع أو غير المتحقق هنا، لكن مع بيان درجته بوضوح قبل ذكر المعنى.
+3. إذا وُجد أكثر من حكم في السياق، فاذكره كما هو من غير خلط.
+"""
+
+    if answer_intent == AnswerIntent.COLLECTION:
+        return common_rules + """
+## سياسة الجمع الشامل للروايات:
+1. يجوز عرض جميع الروايات المسترجعة.
+2. افصل الروايات في الإجابة بحسب الدرجة: صحيح، حسن، ضعيف، موضوع، غير متحقق.
+3. لا تخلط الروايات الضعيفة مع الأحاديث الصحيحة والحسنة في فقرة استدلال واحدة.
+"""
+
+    return common_rules + """
+## سياسة البحث عن حديث بعينه:
+1. ابدأ بأقرب الروايات مطابقة، مع ذكر درجة كل رواية.
+2. إذا كانت الرواية ضعيفة أو موضوعة أو غير متحققة فصرّح بذلك قبل أي شرح موجز.
+3. عند تعدد النتائج، قدّم الصحيح ثم الحسن، ثم بيّن ما دونهما مع التحذير.
+"""
+
+
 # ============================================================
 # Structured Response
 # ============================================================
@@ -169,6 +241,25 @@ class Citation:
 
 
 @dataclass
+class IgnoredNarration:
+    """Narration excluded from the reliable-evidence set."""
+    hadith_index: int
+    hadith_id: str
+    grade: str
+    grade_ar: str
+    reason: str
+    matn_snippet: str
+
+
+@dataclass
+class EvidenceEvaluation:
+    """Structured evidence evaluation before answer generation."""
+    authenticity_of_evidence: str
+    relevance_to_question: str
+    final_sufficiency: str
+
+
+@dataclass
 class GeneratedResponse:
     """Structured response from the generation module."""
     answer: str                                    # Full Arabic answer text
@@ -178,6 +269,12 @@ class GeneratedResponse:
     grounding_issues: list[str] = field(default_factory=list)
     raw_text: str = ""                             # Raw LLM output
     query_type: str = ""                           # For debugging
+    answer_intent: str = ""                        # Policy category used for answering
+    evidence_sufficient: bool = False
+    authenticity_of_evidence: str = "insufficient"
+    relevance_to_question: str = "weak"
+    final_sufficiency: str = "insufficient"
+    ignored_narrations: list[IgnoredNarration] = field(default_factory=list)
 
     def to_dict(self) -> dict:
         """Convert to serializable dict."""
@@ -187,6 +284,12 @@ class GeneratedResponse:
             "warnings": self.warnings,
             "grounding_verified": self.grounding_verified,
             "grounding_issues": self.grounding_issues,
+            "answer_intent": self.answer_intent,
+            "evidence_sufficient": self.evidence_sufficient,
+            "authenticity_of_evidence": self.authenticity_of_evidence,
+            "relevance_to_question": self.relevance_to_question,
+            "final_sufficiency": self.final_sufficiency,
+            "ignored_narrations": [asdict(item) for item in self.ignored_narrations],
         }
 
 
@@ -254,87 +357,437 @@ def _verify_citation_grounding(
     return is_grounded, issues
 
 
+@dataclass
+class _AuditedHadith:
+    source_index: int
+    hadith: RetrievedHadith
+    canonical_grade: str
+    grade_label: str
+    is_authentic: bool
+    is_directly_relevant: bool
+    exclusion_reason: str = ""
+
+
+_TASHKEEL = re.compile(r"[\u0610-\u061A\u064B-\u065F\u0670\u06D6-\u06ED]+")
+_TATWEEL = re.compile(r"\u0640+")
+_WHITESPACE = re.compile(r"\s+")
+_ALEF_VARIANTS = re.compile(r"[أإآٱ]")
+
+_CHARITY_TERMS = ("صدقه", "الصدقه", "صدقة", "الصدقة", "انفاق", "الانفاق", "إنفاق", "تبرع")
+_VIRTUE_TERMS = ("فضل", "فضائل", "فوائد", "اجر", "أجر", "ثواب", "ترغيب", "منفعه", "منفعة")
+_ZAKAT_LEGAL_TERMS = (
+    "زكاه",
+    "الزكاه",
+    "زكاة",
+    "الزكاة",
+    "نصاب",
+    "مصارف",
+    "مصرف",
+    "العاملين عليها",
+    "ابن السبيل",
+    "الفقراء",
+    "المساكين",
+    "صدقه الفطر",
+    "صدقة الفطر",
+)
+_CHARITY_VIRTUE_TERMS = (
+    "الصدقه برهان",
+    "الصدقة برهان",
+    "تطفئ الخطيئه",
+    "تطفئ الخطيئة",
+    "ظل",
+    "اجر الصدقه",
+    "أجر الصدقة",
+    "فضل الصدقه",
+    "فضل الصدقة",
+)
+
+
+def _normalize_audit_text(text: str) -> str:
+    text = _TASHKEEL.sub("", str(text or "").strip().lower())
+    text = _TATWEEL.sub("", text)
+    text = _ALEF_VARIANTS.sub("ا", text)
+    return _WHITESPACE.sub(" ", text).strip()
+
+
+def _is_charity_virtue_query(query: str) -> bool:
+    normalized = _normalize_audit_text(query)
+    return any(term in normalized for term in _CHARITY_TERMS) and any(term in normalized for term in _VIRTUE_TERMS)
+
+
+def _is_legal_zakat_narration(hadith: RetrievedHadith) -> bool:
+    haystack = _normalize_audit_text(
+        " ".join(
+            part
+            for part in (
+                hadith.text_ar,
+                hadith.category,
+                hadith.subcategory_name,
+                hadith.masdar,
+            )
+            if part
+        )
+    )
+    has_legal = any(term in haystack for term in _ZAKAT_LEGAL_TERMS)
+    has_virtue = any(term in haystack for term in _CHARITY_VIRTUE_TERMS)
+    return has_legal and not has_virtue
+
+
+def _detect_topic_exclusion_reason(query: str, hadith: RetrievedHadith) -> str:
+    """
+    Filter known topical mismatches that commonly look relevant lexically
+    but do not answer the user's actual question.
+    """
+    if _is_charity_virtue_query(query) and _is_legal_zakat_narration(hadith):
+        return "يتعلق بأحكام الزكاة أو مصارفها، لا بفضائل الصدقة وثوابها"
+    return ""
+
+
+def _audit_hadiths_for_answer(
+    query: str,
+    hadiths: list[RetrievedHadith],
+) -> tuple[list[_AuditedHadith], list[IgnoredNarration]]:
+    """Audit retrieved narrations for authenticity and direct relevance."""
+    audited: list[_AuditedHadith] = []
+    ignored: list[IgnoredNarration] = []
+
+    for index, hadith in enumerate(hadiths, 1):
+        grade_audit = audit_grade(hadith.grade, hadith.grade_ar, hadith.ruling)
+        canonical_grade = grade_audit.effective_bucket
+        grade_label = resolve_grade_label(hadith.grade, hadith.grade_ar, hadith.ruling)
+        is_authentic = grade_audit.is_usable_for_evidence
+
+        topic_reason = _detect_topic_exclusion_reason(query, hadith)
+        is_directly_relevant = is_authentic and not topic_reason
+        exclusion_reason = ""
+
+        if not is_authentic:
+            exclusion_reason = grade_audit.exclusion_reason
+        elif topic_reason:
+            exclusion_reason = topic_reason
+
+        audited.append(
+            _AuditedHadith(
+                source_index=index,
+                hadith=hadith,
+                canonical_grade=canonical_grade,
+                grade_label=grade_label,
+                is_authentic=is_authentic,
+                is_directly_relevant=is_directly_relevant,
+                exclusion_reason=exclusion_reason,
+            )
+        )
+
+        if exclusion_reason:
+            ignored.append(
+                IgnoredNarration(
+                    hadith_index=index,
+                    hadith_id=hadith.id,
+                    grade=canonical_grade,
+                    grade_ar=grade_label,
+                    reason=exclusion_reason,
+                    matn_snippet=(hadith.text_ar or "")[:120],
+                )
+            )
+    return audited, ignored
+
+
+def _evaluate_retrieved_evidence(audited_hadiths: list[_AuditedHadith]) -> EvidenceEvaluation:
+    """Compute authenticity, relevance, and final sufficiency."""
+    authentic_hadiths = [item for item in audited_hadiths if item.is_authentic]
+    direct_hadiths = [item for item in audited_hadiths if item.is_directly_relevant]
+
+    authenticity = "sufficient" if authentic_hadiths else "insufficient"
+
+    if direct_hadiths:
+        relevance = "direct"
+    elif authentic_hadiths:
+        relevance = "partial"
+    else:
+        relevance = "weak"
+
+    if direct_hadiths:
+        final_sufficiency = "sufficient"
+    elif authentic_hadiths:
+        final_sufficiency = "partial"
+    else:
+        final_sufficiency = "insufficient"
+
+    return EvidenceEvaluation(
+        authenticity_of_evidence=authenticity,
+        relevance_to_question=relevance,
+        final_sufficiency=final_sufficiency,
+    )
+
+
 def _build_citations(
     hadiths: list[RetrievedHadith],
 ) -> list[Citation]:
     """Build citation objects from provided hadiths."""
     citations = []
     for i, h in enumerate(hadiths, 1):
+        canonical_grade = resolve_grade_bucket(h.grade, h.grade_ar, h.ruling)
         grade_ar = resolve_grade_label(h.grade, h.grade_ar, h.ruling)
         citations.append(Citation(
             hadith_index=i,
             hadith_id=h.id,
             matn_snippet=h.text_ar[:100] if h.text_ar else "",
-            grade=h.grade,
+            grade=canonical_grade,
             grade_ar=grade_ar,
             masdar=h.masdar,
             rawi=h.rawi,
             muhaddith=h.muhaddith,
-            is_weak=h.grade in ("daif", "mawdu"),
+            is_weak=canonical_grade in ("daif", "mawdu"),
         ))
     return citations
 
 
-def _format_hadith_context(hadiths: list[RetrievedHadith]) -> str:
+def _build_warning_text(grade: str, grade_ar: str) -> str:
+    """Return a user-facing warning for non-authentic narrations."""
+    if grade in ("daif", "mawdu"):
+        return f"⚠️ {grade_ar}: لا يُحتج به في إثبات الأحكام والفضائل"
+    if grade == "unknown":
+        return "⚠️ غير متحقق: لم تثبت درجته فلا يُستخدم دليلاً"
+    return ""
+
+
+def _order_hadiths_for_generation(
+    hadiths: list[RetrievedHadith],
+    answer_intent: AnswerIntent,
+) -> list[RetrievedHadith]:
+    """Order hadiths for safer presentation without discarding relevant hits."""
+    if answer_intent in {AnswerIntent.EXPLANATORY, AnswerIntent.COLLECTION}:
+        indexed = list(enumerate(hadiths))
+        indexed.sort(key=lambda item: (grade_priority(resolve_grade_bucket(item[1].grade, item[1].grade_ar, item[1].ruling)), item[0]))
+        return [hadith for _, hadith in indexed]
+    return hadiths
+
+
+def _format_hadith_block(
+    index: int,
+    hadith: RetrievedHadith,
+    metadata_first: bool = False,
+) -> str:
+    """Format a single hadith block with explicit grade handling."""
+    canonical_grade = resolve_grade_bucket(hadith.grade, hadith.grade_ar, hadith.ruling)
+    grade_label = resolve_grade_label(hadith.grade, hadith.grade_ar, hadith.ruling)
+    warning = _build_warning_text(canonical_grade, grade_label)
+    warning_line = f"\n   {warning}" if warning else ""
+
+    if metadata_first:
+        return (
+            f"=== الحديث [{index}] ==={warning_line}\n"
+            f"   📋 الراوي: {hadith.rawi}\n"
+            f"   📋 المحدِّث: {hadith.muhaddith}\n"
+            f"   📋 الدرجة: {grade_label}\n"
+            f"   📋 الحكم التفصيلي: {hadith.ruling}\n"
+            f"   📋 المصدر: {hadith.masdar}\n"
+            f"   📋 الرقم/الصفحة: {hadith.safha_raqam}\n"
+            f"   📋 التصنيف: {hadith.category} — {hadith.subcategory_name}\n"
+            f"   📋 المتن: {hadith.text_ar}"
+        )
+
+    return (
+        f"--- الحديث [{index}] ---{warning_line}\n"
+        f"   المتن: {hadith.text_ar}\n"
+        f"   الدرجة: {grade_label}\n"
+        f"   الحكم التفصيلي: {hadith.ruling}\n"
+        f"   الراوي: {hadith.rawi}\n"
+        f"   المحدِّث: {hadith.muhaddith}\n"
+        f"   المصدر: {hadith.masdar}\n"
+        f"   الرقم/الصفحة: {hadith.safha_raqam}\n"
+        f"   التصنيف: {hadith.category} — {hadith.subcategory_name}"
+    )
+
+
+def _group_hadiths_by_grade(hadiths: list[RetrievedHadith]) -> dict[str, list[RetrievedHadith]]:
+    """Group hadiths by canonical grade bucket."""
+    groups = {grade: [] for grade in ("sahih", "hasan", "daif", "mawdu", "unknown")}
+    for hadith in hadiths:
+        groups[resolve_grade_bucket(hadith.grade, hadith.grade_ar, hadith.ruling)].append(hadith)
+    return groups
+
+
+def _format_grouped_sections(
+    sections: list[tuple[str, list[RetrievedHadith]]],
+    metadata_first: bool = False,
+) -> str:
+    """Format multiple hadith sections with fresh indices per final context order."""
+    rendered_sections = []
+    current_index = 1
+
+    for title, section_hadiths in sections:
+        if not section_hadiths:
+            continue
+
+        rendered_sections.append(title)
+        blocks = []
+        for hadith in section_hadiths:
+            blocks.append(_format_hadith_block(current_index, hadith, metadata_first=metadata_first))
+            current_index += 1
+        rendered_sections.append("\n\n".join(blocks))
+
+    return "\n\n".join(rendered_sections)
+
+
+def _format_hadith_context(
+    hadiths: list[RetrievedHadith],
+    answer_intent: AnswerIntent,
+) -> str:
     """
     Format retrieved hadiths into a structured context string for the LLM.
     Each hadith is formatted as a numbered block with all metadata.
     """
-    context_parts = []
+    if answer_intent == AnswerIntent.EXPLANATORY:
+        groups = _group_hadiths_by_grade(hadiths)
+        authentic = groups["sahih"] + groups["hasan"]
+        non_evidence = groups["daif"] + groups["mawdu"] + groups["unknown"]
+        sections = []
+        if authentic:
+            sections.append(("### الأحاديث المسموح الاستدلال بها (صحيح وحسن)", authentic))
+        else:
+            sections.append(("### لا يوجد في النتائج حديث صحيح أو حسن يمكن الاستدلال به", []))
+        if non_evidence:
+            sections.append(("### روايات غير صالحة للاحتجاج (ضعيف أو موضوع أو غير متحقق)", non_evidence))
+        return _format_grouped_sections(sections)
 
-    for i, h in enumerate(hadiths, 1):
-        grade_label = resolve_grade_label(h.grade, h.grade_ar, h.ruling)
-        warning = ""
-        if h.grade in ("daif", "mawdu"):
-            warning = f"\n   ⚠️ تنبيه: حديث {grade_label}"
+    if answer_intent == AnswerIntent.COLLECTION:
+        groups = _group_hadiths_by_grade(hadiths)
+        sections = [
+            ("### الأحاديث الصحيحة", groups["sahih"]),
+            ("### الأحاديث الحسنة", groups["hasan"]),
+            ("### الأحاديث الضعيفة", groups["daif"]),
+            ("### الأحاديث الموضوعة", groups["mawdu"]),
+            ("### الروايات غير المتحققة", groups["unknown"]),
+        ]
+        return _format_grouped_sections(sections)
 
-        block = (
-            f"--- الحديث [{i}] ---{warning}\n"
-            f"   المتن: {h.text_ar}\n"
-            f"   الدرجة: {grade_label}\n"
-            f"   الحكم التفصيلي: {h.ruling}\n"
-            f"   الراوي: {h.rawi}\n"
-            f"   المحدِّث: {h.muhaddith}\n"
-            f"   المصدر: {h.masdar}\n"
-            f"   الرقم/الصفحة: {h.safha_raqam}\n"
-            f"   التصنيف: {h.category} — {h.subcategory_name}"
-        )
-        context_parts.append(block)
-
-    return "\n\n".join(context_parts)
+    return "\n\n".join(
+        _format_hadith_block(i, hadith)
+        for i, hadith in enumerate(hadiths, 1)
+    )
 
 
-def _format_metadata_context(hadiths: list[RetrievedHadith]) -> str:
+def _format_metadata_context(
+    hadiths: list[RetrievedHadith],
+    answer_intent: AnswerIntent,
+) -> str:
     """
     Format hadith context emphasizing metadata for metadata-focused queries.
     Places metadata fields prominently before the matn text.
     """
-    context_parts = []
+    if answer_intent in {AnswerIntent.EXPLANATORY, AnswerIntent.COLLECTION}:
+        groups = _group_hadiths_by_grade(hadiths)
+        sections = [
+            ("### الأحاديث الصحيحة", groups["sahih"]),
+            ("### الأحاديث الحسنة", groups["hasan"]),
+            ("### الأحاديث الضعيفة", groups["daif"]),
+            ("### الأحاديث الموضوعة", groups["mawdu"]),
+            ("### الروايات غير المتحققة", groups["unknown"]),
+        ]
+        return _format_grouped_sections(sections, metadata_first=True)
 
-    for i, h in enumerate(hadiths, 1):
-        grade_label = resolve_grade_label(h.grade, h.grade_ar, h.ruling)
-        warning = ""
-        if h.grade in ("daif", "mawdu"):
-            warning = f"\n   ⚠️ تنبيه: حديث {grade_label}"
+    return "\n\n".join(
+        _format_hadith_block(i, hadith, metadata_first=True)
+        for i, hadith in enumerate(hadiths, 1)
+    )
 
-        block = (
-            f"=== الحديث [{i}] ==={warning}\n"
-            f"   📋 الراوي: {h.rawi}\n"
-            f"   📋 المحدِّث: {h.muhaddith}\n"
-            f"   📋 الدرجة: {grade_label}\n"
-            f"   📋 الحكم التفصيلي: {h.ruling}\n"
-            f"   📋 المصدر: {h.masdar}\n"
-            f"   📋 الرقم/الصفحة: {h.safha_raqam}\n"
-            f"   📋 التصنيف: {h.category} — {h.subcategory_name}\n"
-            f"   📋 المتن: {h.text_ar}"
+
+def _format_ignored_narrations(ignored_narrations: list[IgnoredNarration]) -> str:
+    """Render excluded narrations as a deterministic final section."""
+    if not ignored_narrations:
+        return "لا توجد روايات مستبعدة."
+
+    lines = []
+    for item in ignored_narrations:
+        snippet = item.matn_snippet.strip()
+        if len(snippet) > 120:
+            snippet = snippet[:117] + "..."
+        lines.append(
+            f"{item.hadith_index}. الدرجة: {item.grade_ar} | السبب: {item.reason} | النص: {snippet}"
         )
-        context_parts.append(block)
-
-    return "\n\n".join(context_parts)
+    return "\n".join(lines)
 
 
-def _select_system_prompt(query_type: str) -> str:
+def _build_non_explanatory_fallback_body(evaluation: EvidenceEvaluation) -> str:
+    """Deterministic fallback when a hadith-based answer cannot be given."""
+    if evaluation.final_sufficiency == "partial":
+        return (
+            "توجد روايات صحيحة أو حسنة في النتائج، لكنها لا تجيب مباشرة عن السؤال المطلوب، "
+            "لذلك لا يمكن بناء جواب حديثي مباشر مكتمل من هذه النتائج."
+        )
+
+    return "النتائج المسترجعة لا تقدم دليلاً حديثياً مناسباً لهذا السؤال."
+
+
+def _build_explanatory_fallback_user_message(
+    query: str,
+    ignored_narrations: list[IgnoredNarration],
+    evaluation: EvidenceEvaluation,
+) -> str:
+    """Build the user message for general explanatory fallback mode."""
+    summary_lines = []
+    for item in ignored_narrations[:5]:
+        summary_lines.append(f"- الحديث [{item.hadith_index}] استُبعد لأن: {item.reason}")
+
+    ignored_summary = "\n".join(summary_lines) if summary_lines else "- لم تُسترجع روايات يمكن الاعتماد عليها."
+
+    return (
+        "## السؤال التفسيري:\n"
+        f"{query}\n\n"
+        "## نتيجة فحص الأحاديث المسترجعة:\n"
+        f"Authenticity of evidence: {evaluation.authenticity_of_evidence}\n"
+        f"Relevance to question: {evaluation.relevance_to_question}\n"
+        f"Final sufficiency: {evaluation.final_sufficiency}\n"
+        "الأحاديث المسترجعة غير كافية أو غير مرتبطة مباشرة بالسؤال التفسيري.\n"
+        "فيما يلي ملخص موجز للأسباب:\n"
+        f"{ignored_summary}\n\n"
+        "## المطلوب:\n"
+        "قدّم شرحاً عاماً صادقاً ومفيداً للمستخدم باللغة العربية الفصحى، من غير ذكر أي حديث غير موجود في النتائج، "
+        "ومن غير اختلاق نصوص أو مصادر. إذا احتجت إلى التوضيح فليكن على صورة مبادئ ومعانٍ عامة فقط."
+    )
+
+
+def _build_explanatory_fallback_prefix(evaluation: EvidenceEvaluation) -> str:
+    """Deterministic lead-in for explanatory fallback answers."""
+    if evaluation.final_sufficiency == "partial":
+        return (
+            "توجد روايات صحيحة أو حسنة في النتائج، لكنها لا تجيب مباشرة عن السؤال، "
+            "ولذلك سيكون الجواب الآتي شرحاً عاماً محدوداً لا استدلالاً حديثياً مباشراً."
+        )
+
+    return (
+        "النتائج المسترجعة لا توفر دليلاً حديثياً مناسباً لهذا السؤال، "
+        "ولذلك سيكون الجواب الآتي شرحاً عاماً بلا الاستناد إلى حديث معين."
+    )
+
+
+def _wrap_audited_answer(
+    evaluation: EvidenceEvaluation,
+    core_answer: str,
+    ignored_narrations: list[IgnoredNarration],
+) -> str:
+    """Wrap the answer in the required audit output structure."""
+    answer_body = core_answer.strip()
+    excluded_lines = "\n".join(
+        f"* [{item.hadith_index}] {item.reason}"
+        for item in ignored_narrations
+    ) or "* None"
+
+    return (
+        f"Authenticity of evidence: {evaluation.authenticity_of_evidence}\n"
+        f"Relevance to question: {evaluation.relevance_to_question}\n"
+        f"Final sufficiency: {evaluation.final_sufficiency}\n\n"
+        f"Answer:\n{answer_body}\n\n"
+        f"Excluded narrations:\n\n"
+        f"{excluded_lines}"
+    )
+
+
+def _select_system_prompt(query_type: str, answer_intent: AnswerIntent) -> str:
     """Select the appropriate system prompt based on query type."""
+    if answer_intent == AnswerIntent.EXPLANATORY:
+        return SYSTEM_PROMPT_GENERAL
     if query_type == "metadata":
         return SYSTEM_PROMPT_METADATA
     elif query_type == "narrator":
@@ -415,6 +868,30 @@ class HadithGenerator:
 
         logger.info(f"Gemini generator initialized: model={self.model_name}")
 
+    def _generate_general_explanatory_fallback(
+        self,
+        query: str,
+        ignored_narrations: list[IgnoredNarration],
+        evaluation: EvidenceEvaluation,
+        max_output_tokens: int,
+    ) -> str:
+        """Generate a hadith-free explanatory answer when retrieval evidence is insufficient."""
+        user_message = _build_explanatory_fallback_user_message(query, ignored_narrations, evaluation)
+        merged_prompt = (
+            f"## تعليمات النظام:\n{SYSTEM_PROMPT_GENERAL_EXPLANATION_FALLBACK}\n\n"
+            f"## رسالة المستخدم:\n{user_message}"
+        )
+
+        response = self.client.models.generate_content(
+            model=self.model_name,
+            contents=merged_prompt,
+            config=types.GenerateContentConfig(
+                temperature=0.2,
+                max_output_tokens=max_output_tokens,
+            ),
+        )
+        return response.text or ""
+
     def generate(
         self,
         query: str,
@@ -441,34 +918,102 @@ class HadithGenerator:
         Returns:
             GeneratedResponse with answer, citations, grounding status, and warnings.
         """
+        answer_intent = classify_answer_intent(
+            query=query,
+            query_type=query_type,
+            metadata_fields=metadata_fields,
+        )
+
+        empty_evaluation = EvidenceEvaluation(
+            authenticity_of_evidence="insufficient",
+            relevance_to_question="weak",
+            final_sufficiency="insufficient",
+        )
+
         if not hadiths:
+            if answer_intent == AnswerIntent.EXPLANATORY:
+                general_text = self._generate_general_explanatory_fallback(
+                    query=query,
+                    ignored_narrations=[],
+                    evaluation=empty_evaluation,
+                    max_output_tokens=max_output_tokens,
+                )
+                core_answer = f"{_build_explanatory_fallback_prefix(empty_evaluation)}\n\n{general_text}".strip()
+            else:
+                core_answer = _build_non_explanatory_fallback_body(empty_evaluation)
+            answer = _wrap_audited_answer(
+                evaluation=empty_evaluation,
+                core_answer=core_answer,
+                ignored_narrations=[],
+            )
             return GeneratedResponse(
-                answer="لم أجد أحاديث متعلقة بسؤالك في قاعدة البيانات المتاحة.",
+                answer=answer,
                 grounding_verified=True,
+                raw_text=core_answer,
                 query_type=query_type,
+                answer_intent=answer_intent.value,
+                evidence_sufficient=False,
+                authenticity_of_evidence=empty_evaluation.authenticity_of_evidence,
+                relevance_to_question=empty_evaluation.relevance_to_question,
+                final_sufficiency=empty_evaluation.final_sufficiency,
             )
 
+        audited_hadiths, ignored_narrations = _audit_hadiths_for_answer(query, hadiths)
+        evaluation = _evaluate_retrieved_evidence(audited_hadiths)
+        direct_hadiths = [item.hadith for item in audited_hadiths if item.is_directly_relevant]
+        ordered_direct_hadiths = _order_hadiths_for_generation(direct_hadiths, answer_intent)
+        evidence_sufficient = evaluation.final_sufficiency == "sufficient"
+
         # Build citations
-        citations = _build_citations(hadiths)
+        citations = _build_citations(ordered_direct_hadiths)
         
-        # Build warnings for weak/fabricated hadiths
-        warnings = []
-        for c in citations:
-            if c.is_weak:
-                warnings.append(
-                    f"⚠️ الحديث [{c.hadith_index}] — {c.grade_ar}: "
-                    f"لا يُحتج به في إثبات الأحكام"
+        # Build warnings from excluded narrations
+        warnings = [
+            f"⚠️ استُبعد الحديث [{item.hadith_index}] — {item.reason}"
+            for item in ignored_narrations
+        ]
+
+        if evaluation.final_sufficiency != "sufficient":
+            if answer_intent == AnswerIntent.EXPLANATORY:
+                general_text = self._generate_general_explanatory_fallback(
+                    query=query,
+                    ignored_narrations=ignored_narrations,
+                    evaluation=evaluation,
+                    max_output_tokens=max_output_tokens,
                 )
+                answer_body = f"{_build_explanatory_fallback_prefix(evaluation)}\n\n{general_text}".strip()
+            else:
+                answer_body = _build_non_explanatory_fallback_body(evaluation)
+            final_answer = _wrap_audited_answer(
+                evaluation=evaluation,
+                core_answer=answer_body,
+                ignored_narrations=ignored_narrations,
+            )
+            return GeneratedResponse(
+                answer=final_answer,
+                citations=citations,
+                warnings=warnings,
+                grounding_verified=True,
+                raw_text=answer_body,
+                query_type=query_type,
+                answer_intent=answer_intent.value,
+                evidence_sufficient=evaluation.final_sufficiency == "sufficient",
+                authenticity_of_evidence=evaluation.authenticity_of_evidence,
+                relevance_to_question=evaluation.relevance_to_question,
+                final_sufficiency=evaluation.final_sufficiency,
+                ignored_narrations=ignored_narrations,
+            )
 
         # Select system prompt and context format based on query type
-        system_prompt = _select_system_prompt(query_type)
+        system_prompt = _select_system_prompt(query_type, answer_intent)
+        intent_policy_prompt = _build_intent_policy_prompt(answer_intent)
         
         if query_type == "metadata":
-            context = _format_metadata_context(hadiths)
+            context = _format_metadata_context(ordered_direct_hadiths, answer_intent)
             # Lower temperature for metadata answers (factual)
             temperature = min(temperature, 0.1)
         else:
-            context = _format_hadith_context(hadiths)
+            context = _format_hadith_context(ordered_direct_hadiths, answer_intent)
 
         # Build the user message with context
         user_message = f"""## السياق (الأحاديث المسترجعة):
@@ -479,14 +1024,14 @@ class HadithGenerator:
 
         # For explain_hadith queries: add a relevance hint so the LLM knows
         # whether the specific hadith was found in the corpus
-        if query_type == "explain_hadith":
+        if query_type == "explain_hadith" and answer_intent == AnswerIntent.LOOKUP:
             from retrieval.query_preprocessor import _extract_hadith_text_from_explain_query
             # Derive the requested hadith text from the normalized query
             norm_q = re.sub(r"[\u0610-\u061A\u064B-\u065F\u0670\u0640]", "", query)
             norm_q = re.sub(r"[أإآٱ]", "ا", norm_q)
             norm_q = re.sub(r"\s+", " ", norm_q).strip()
             requested_text = _extract_hadith_text_from_explain_query(norm_q)
-            corpus_has_it = _check_hadith_relevance(requested_text, hadiths)
+            corpus_has_it = _check_hadith_relevance(requested_text, ordered_direct_hadiths)
             if not corpus_has_it:
                 user_message += (
                     f"\n\n## ⚠️ تنبيه للنموذج (لا تعرضه للمستخدم كما هو):\n"
@@ -524,13 +1069,18 @@ class HadithGenerator:
 
         logger.info(
             f"Generating answer: model={self.model_name}, "
-            f"hadiths={len(hadiths)}, query_type={query_type}, "
+            f"hadiths={len(ordered_direct_hadiths)}, query_type={query_type}, "
+            f"answer_intent={answer_intent.value}, "
+            f"evaluation={evaluation.final_sufficiency}, "
             f"temp={temperature}"
         )
 
         # gemma-3-* does not support system_instruction, so merge it into contents.
         merged_prompt = (
             f"## تعليمات النظام:\n{system_prompt}\n\n"
+            f"## سياسة الإجابة بحسب نية السؤال:\n"
+            f"التصنيف الداخلي: {INTENT_AR_LABELS[answer_intent]}\n"
+            f"{intent_policy_prompt}\n\n"
             f"## رسالة المستخدم:\n{user_message}"
         )
 
@@ -552,30 +1102,42 @@ class HadithGenerator:
         #     max_tokens=max_output_tokens,
         # )
 
-        answer = response.text or ""
-        # answer = response.choices[0].message.content
-        logger.info(f"Generation complete: {len(answer)} chars")
+        core_answer = response.text or ""
+        # core_answer = response.choices[0].message.content
+        logger.info(f"Generation complete: {len(core_answer)} chars")
 
         # Citation grounding verification
         grounding_verified = True
         grounding_issues = []
         if verify_grounding:
             grounding_verified, grounding_issues = _verify_citation_grounding(
-                answer, hadiths
+                core_answer, ordered_direct_hadiths
             )
             if not grounding_verified:
                 logger.warning(
                     f"Grounding issues detected: {grounding_issues}"
                 )
 
+        final_answer = _wrap_audited_answer(
+            evaluation=evaluation,
+            core_answer=core_answer,
+            ignored_narrations=ignored_narrations,
+        )
+
         return GeneratedResponse(
-            answer=answer,
+            answer=final_answer,
             citations=citations,
             warnings=warnings,
             grounding_verified=grounding_verified,
             grounding_issues=grounding_issues,
-            raw_text=answer,
+            raw_text=core_answer,
             query_type=query_type,
+            answer_intent=answer_intent.value,
+            evidence_sufficient=True,
+            authenticity_of_evidence=evaluation.authenticity_of_evidence,
+            relevance_to_question=evaluation.relevance_to_question,
+            final_sufficiency=evaluation.final_sufficiency,
+            ignored_narrations=ignored_narrations,
         )
 
 

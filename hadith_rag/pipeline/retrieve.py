@@ -14,7 +14,7 @@ from dataclasses import dataclass, field
 import chromadb
 from chromadb.config import Settings as ChromaSettings
 
-from pipeline.config import settings
+from pipeline.config import resolve_grade_bucket, settings
 
 logger = logging.getLogger(__name__)
 
@@ -133,13 +133,16 @@ class HadithRetriever:
         if results["ids"] and results["ids"][0]:
             for i, doc_id in enumerate(results["ids"][0]):
                 metadata = results["metadatas"][0][i] if results["metadatas"] else {}
+                raw_grade = metadata.get("grade", "")
+                raw_grade_ar = metadata.get("grade_ar", "")
+                raw_ruling = metadata.get("ruling", "")
                 hadith = RetrievedHadith(
                     id=doc_id,
                     text_ar=results["documents"][0][i] if results["documents"] else "",
                     distance=results["distances"][0][i] if results["distances"] else 1.0,
-                    grade=metadata.get("grade", ""),
-                    grade_ar=metadata.get("grade_ar", ""),
-                    ruling=metadata.get("ruling", ""),
+                    grade=resolve_grade_bucket(raw_grade, raw_grade_ar, raw_ruling),
+                    grade_ar=raw_grade_ar,
+                    ruling=raw_ruling,
                     rawi=metadata.get("rawi", ""),
                     muhaddith=metadata.get("mohadeth", ""),        # stored as 'mohadeth' in ChromaDB
                     masdar=metadata.get("book", ""),               # stored as 'book' in ChromaDB
