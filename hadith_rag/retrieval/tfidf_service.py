@@ -216,7 +216,7 @@ class TFIDFService:
             logger.error(
                 f"TF-IDF index at {path} is corrupt or incompatible: {e}. "
                 "Deleting it — will run in dense-only mode. "
-                "Run: python rebuild_tfidf.py to rebuild."
+                "Run: python -m retrieval.build_tfidf_index to rebuild."
             )
             try:
                 path.unlink()

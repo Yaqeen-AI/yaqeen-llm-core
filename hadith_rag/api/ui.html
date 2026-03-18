@@ -191,7 +191,7 @@
   input.addEventListener('keydown', e => { if (e.key === 'Enter') ask(); });
 
   function gradeBadge(hadith) {
-    const map = { sahih: 'صحيح', hasan: 'حسن', daif: 'ضعيف', mawdu: 'موضوع', unknown: 'غير محدد' };
+    const map = { sahih: 'صحيح', hasan: 'حسن', daif: 'ضعيف', mawdu: 'موضوع', unknown: 'غير متحقق' };
     const label = hadith.grade_ar || hadith.ruling || map[hadith.grade] || hadith.grade || 'غير محدد';
     return `<span class="badge ${hadith.grade || 'unknown'}">${escHtml(label)}</span>`;
   }

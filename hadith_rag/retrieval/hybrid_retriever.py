@@ -27,7 +27,7 @@ from pathlib import Path
 from typing import Optional
 from dataclasses import dataclass, field
 
-from pipeline.config import settings
+from pipeline.config import resolve_grade_bucket, settings
 from pipeline.embed_query import JinaQueryEmbedder
 from pipeline.retrieve import HadithRetriever, RetrievedHadith, RetrievalResult
 from retrieval.tfidf_service import TFIDFService, get_tfidf_service
@@ -338,13 +338,16 @@ class HybridRetriever:
                 if fetched["ids"]:
                     for i, doc_id in enumerate(fetched["ids"]):
                         metadata = fetched["metadatas"][i] if fetched["metadatas"] else {}
+                        raw_grade = metadata.get("grade", "")
+                        raw_grade_ar = metadata.get("grade_ar", "")
+                        raw_ruling = metadata.get("ruling", "")
                         sparse_map[doc_id] = RetrievedHadith(
                             id=doc_id,
                             text_ar=fetched["documents"][i] if fetched["documents"] else "",
                             distance=0.5,  # Placeholder — RRF score used for ordering
-                            grade=metadata.get("grade", ""),
-                            grade_ar=metadata.get("grade_ar", ""),
-                            ruling=metadata.get("ruling", ""),
+                            grade=resolve_grade_bucket(raw_grade, raw_grade_ar, raw_ruling),
+                            grade_ar=raw_grade_ar,
+                            ruling=raw_ruling,
                             rawi=metadata.get("rawi", ""),
                             muhaddith=metadata.get("mohadeth", ""),       # stored as 'mohadeth' in ChromaDB
                             masdar=metadata.get("book", ""),              # stored as 'book' in ChromaDB
