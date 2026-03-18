@@ -87,13 +87,29 @@ class CitationResponse(BaseModel):
     is_weak: bool
 
 
+class IgnoredNarrationResponse(BaseModel):
+    """A narration excluded from the reliable evidence set."""
+    hadith_index: int
+    hadith_id: str
+    grade: str
+    grade_ar: str
+    reason: str
+    matn_snippet: str
+
+
 class QueryResponse(BaseModel):
     """Response body for /query endpoint."""
     request_id: str
     query: str
     answer: str
     query_type: str = "general"
+    answer_intent: str = ""
+    evidence_sufficient: bool = False
+    authenticity_of_evidence: str = "insufficient"
+    relevance_to_question: str = "weak"
+    final_sufficiency: str = "insufficient"
     citations: list[CitationResponse] = []
+    ignored_narrations: list[IgnoredNarrationResponse] = []
     warnings: list[str] = []
     grounding_verified: bool = False
     hadiths: list[HadithResponse] = []
@@ -289,6 +305,7 @@ async def query_hadith(request: QueryRequest):
         ]
         
         citations = []
+        ignored_narrations = []
         warnings = []
         grounding_verified = False
         
@@ -307,6 +324,17 @@ async def query_hadith(request: QueryRequest):
                 )
                 for c in result.generation.citations
             ]
+            ignored_narrations = [
+                IgnoredNarrationResponse(
+                    hadith_index=item.hadith_index,
+                    hadith_id=item.hadith_id,
+                    grade=item.grade,
+                    grade_ar=item.grade_ar,
+                    reason=item.reason,
+                    matn_snippet=item.matn_snippet,
+                )
+                for item in result.generation.ignored_narrations
+            ]
             warnings = result.generation.warnings
             grounding_verified = result.generation.grounding_verified
         
@@ -315,7 +343,13 @@ async def query_hadith(request: QueryRequest):
             query=result.query,
             answer=result.answer,
             query_type=result.query_type,
+            answer_intent=result.answer_intent,
+            evidence_sufficient=result.evidence_sufficient,
+            authenticity_of_evidence=result.authenticity_of_evidence,
+            relevance_to_question=result.relevance_to_question,
+            final_sufficiency=result.final_sufficiency,
             citations=citations,
+            ignored_narrations=ignored_narrations,
             warnings=warnings,
             grounding_verified=grounding_verified,
             hadiths=hadiths,
