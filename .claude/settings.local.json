@@ -1,0 +1,30 @@
+{
+  "permissions": {
+    "allow": [
+      "WebFetch(domain:dev.to)",
+      "Bash(E:/PythonProject4/.venv/Scripts/pip list *)",
+      "Bash(.venv/Scripts/pip install *)",
+      "Bash(.venv/Scripts/pip uninstall *)",
+      "Bash(rm -f arabic_utils.py config.py generator.py retriever.py rag.py)",
+      "Bash(.venv/Scripts/pip show *)",
+      "Bash(.venv/Scripts/python -c ' *)",
+      "Bash(.venv/Scripts/python ingest.py)",
+      "Bash(taskkill *)",
+      "Bash(tasklist //FI \"IMAGENAME eq python.exe\")",
+      "Bash(.venv/Scripts/python app.py)",
+      "Bash(ping -n 6 127.0.0.1)",
+      "Bash(.venv/Scripts/python -c \"import inspect, gradio as gr; print\\(inspect.signature\\(gr.Chatbot.__init__\\)\\)\")",
+      "Bash(.venv/Scripts/python -c \"import inspect, gradio as gr; print\\([p for p in inspect.signature\\(gr.Blocks.launch\\).parameters]\\)\")",
+      "Bash(python -c ' *)",
+      "Bash(python -c \"import gradio; print\\(gradio.__version__\\)\")",
+      "Bash(wmic process *)",
+      "PowerShell(Stop-Process *)",
+      "Bash(mkdir -p scripts data)",
+      "Bash(mv ingest.py scripts/)",
+      "Bash(mv enrich_payloads.py scripts/)",
+      "Bash(mv tfidf_model.pkl data/)",
+      "Bash(mv embed_checkpoint.pkl data/)",
+      "Bash(python -c \"from core.retriever import FiqhRetriever; from core.cache import TwoTierCache; print\\('imports OK'\\)\")"
+    ]
+  }
+}
