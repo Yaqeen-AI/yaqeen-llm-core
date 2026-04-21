@@ -23,17 +23,61 @@
 
 import logging
 import time
+from collections import OrderedDict
 from pathlib import Path
-from typing import Optional
+from threading import Lock
+from typing import Optional, Literal
 from dataclasses import dataclass, field
 
 from pipeline.config import resolve_grade_bucket, settings
 from pipeline.embed_query import JinaQueryEmbedder
 from pipeline.retrieve import HadithRetriever, RetrievedHadith, RetrievalResult
+from retrieval.bm25_service import BM25Service, get_bm25_service
 from retrieval.tfidf_service import TFIDFService, get_tfidf_service
 from retrieval.query_preprocessor import preprocess_query, ProcessedQuery
 
 logger = logging.getLogger(__name__)
+
+
+class EmbeddingCache:
+    """Thread-safe in-memory TTL + LRU cache for query embeddings."""
+
+    def __init__(self, max_size: int, ttl_seconds: int):
+        self._max_size = max(1, int(max_size))
+        self._ttl_seconds = max(1, int(ttl_seconds))
+        self._items: OrderedDict[str, tuple[float, list[float]]] = OrderedDict()
+        self._lock = Lock()
+
+    def get(self, key: str) -> Optional[list[float]]:
+        now = time.monotonic()
+        with self._lock:
+            cached = self._items.get(key)
+            if cached is None:
+                return None
+
+            expires_at, value = cached
+            if expires_at <= now:
+                del self._items[key]
+                return None
+
+            self._items.move_to_end(key)
+            return value
+
+    def put(self, key: str, value: list[float]) -> None:
+        expires_at = time.monotonic() + self._ttl_seconds
+        with self._lock:
+            if key in self._items:
+                del self._items[key]
+            self._items[key] = (expires_at, value)
+            self._items.move_to_end(key)
+
+            while len(self._items) > self._max_size:
+                self._items.popitem(last=False)
+
+    @property
+    def size(self) -> int:
+        with self._lock:
+            return len(self._items)
 
 
 # ============================================================
@@ -154,13 +198,25 @@ class HybridRetriever:
         embedder: Optional[JinaQueryEmbedder] = None,
         dense_retriever: Optional[HadithRetriever] = None,
         tfidf_service: Optional[TFIDFService] = None,
+        bm25_service: Optional[BM25Service] = None,
         tfidf_cache_path: Optional[Path] = None,
+        bm25_cache_path: Optional[Path] = None,
+        embedding_cache_size: Optional[int] = None,
+        embedding_cache_ttl_seconds: Optional[int] = None,
     ):
         self.embedder = embedder
         self.dense_retriever = dense_retriever
         self.tfidf = tfidf_service or get_tfidf_service()
+        self.bm25 = bm25_service or get_bm25_service()
         self.tfidf_cache_path = tfidf_cache_path or (
             settings.DATA_DIR / "tfidf_index.pkl"
+        )
+        self.bm25_cache_path = bm25_cache_path or (
+            settings.DATA_DIR / "bm25_index.pkl"
+        )
+        self.embedding_cache = EmbeddingCache(
+            max_size=embedding_cache_size or settings.EMBEDDING_CACHE_SIZE,
+            ttl_seconds=embedding_cache_ttl_seconds or settings.EMBEDDING_CACHE_TTL_SECONDS,
         )
 
         self._initialized = False
@@ -190,6 +246,15 @@ class HybridRetriever:
                     "Hybrid retrieval will use dense-only mode until TF-IDF is built. "
                     "Run: python -m retrieval.build_tfidf_index"
                 )
+
+        if not self.bm25.is_built:
+            loaded = self.bm25.load(self.bm25_cache_path)
+            if not loaded:
+                logger.warning(
+                    f"BM25 index not found at {self.bm25_cache_path}. "
+                    "BM25 retrieval mode will fall back to dense-only until BM25 is built. "
+                    "Run: python -m retrieval.build_bm25_index"
+                )
         
         self._initialized = True
         logger.info("HybridRetriever initialized")
@@ -203,6 +268,7 @@ class HybridRetriever:
         grade_filter: Optional[str | list[str]] = None,
         masdar_filter: Optional[str | list[str]] = None,
         enable_dedup: bool = True,
+        retrieval_mode: Literal["tfidf", "bm25", "both"] = "both",
     ) -> HybridResult:
         """
         Execute hybrid retrieval: dense + sparse → RRF fusion → dedup.
@@ -210,17 +276,21 @@ class HybridRetriever:
         Args:
             query: User's search query (raw text)
             dense_top_k: Number of dense (ChromaDB) results
-            sparse_top_k: Number of sparse (BM25) results
+            sparse_top_k: Number of sparse (TF-IDF/BM25) results
             fused_top_k: Number of results after RRF fusion
             grade_filter: Optional grade filter(s)
             masdar_filter: Optional source book filter (str or list of canonical names)
             enable_dedup: Whether to deduplicate by canonical group
+            retrieval_mode: Sparse mode to use: tfidf, bm25, or both
             
         Returns:
             HybridResult with fused, deduplicated hadiths
         """
         if not self._initialized:
             self.initialize()
+
+        if retrieval_mode not in {"tfidf", "bm25", "both"}:
+            raise ValueError(f"Unsupported retrieval_mode: {retrieval_mode}")
         
         timing = {}
         total_start = time.time()
@@ -247,7 +317,14 @@ class HybridRetriever:
 
         # ── Step 2: Dense retrieval (Jina → ChromaDB) ──
         t0 = time.time()
-        query_vector = self.embedder.embed_query(processed.dense_query)
+        model_name = getattr(self.embedder, "model", "")
+        dimensions = getattr(self.embedder, "dimensions", "")
+        cache_key = f"{model_name}|{dimensions}|{processed.dense_query.strip()}"
+
+        query_vector = self.embedding_cache.get(cache_key)
+        if query_vector is None:
+            query_vector = self.embedder.embed_query(processed.dense_query)
+            self.embedding_cache.put(cache_key, query_vector)
         
         dense_result = self.dense_retriever.retrieve(
             query_embedding=query_vector,
@@ -261,54 +338,62 @@ class HybridRetriever:
         ]
         timing["dense"] = time.time() - t0
         
-        # ── Step 3: Sparse retrieval (TF-IDF char n-gram) — Multi-Query ──
-        # Uses ALL query variants produced by the expander:
-        #   - processed.sparse_query    : original + morphological/ontology tokens
-        #   - processed.multi_queries   : reformulations (question→statement, framing)
-        # Each variant is searched independently; results are merged via RRF so
-        # that hadiths appearing across multiple query variants rank higher.
-        sparse_ranked_lists: list[list[tuple[str, float]]] = []
-        if self.tfidf.is_built:
+        sparse_queries_to_run: list[str] = []
+        seen_sq: set[str] = set()
+        for sq in [processed.sparse_query] + processed.multi_queries:
+            sq_stripped = sq.strip()
+            if sq_stripped and sq_stripped not in seen_sq:
+                sparse_queries_to_run.append(sq_stripped)
+                seen_sq.add(sq_stripped)
+
+        # ── Step 3a: Sparse retrieval (TF-IDF char n-gram) — Multi-Query ──
+        tfidf_ranked: list[tuple[str, float]] = []
+        tfidf_ranked_lists: list[list[tuple[str, float]]] = []
+        if retrieval_mode in {"tfidf", "both"} and self.tfidf.is_built:
             t0 = time.time()
-
-            # Build deduplicated set of sparse queries to run
-            sparse_queries_to_run: list[str] = []
-            seen_sq: set[str] = set()
-            for sq in [processed.sparse_query] + processed.multi_queries:
-                sq_stripped = sq.strip()
-                if sq_stripped and sq_stripped not in seen_sq:
-                    sparse_queries_to_run.append(sq_stripped)
-                    seen_sq.add(sq_stripped)
-
             for sq in sparse_queries_to_run:
                 result_list = self.tfidf.search(sq, top_k=sparse_top_k)
                 if result_list:
-                    sparse_ranked_lists.append(result_list)
+                    tfidf_ranked_lists.append(result_list)
 
-            # Fuse all sparse result lists via RRF to get a single sparse ranking
-            if sparse_ranked_lists:
-                sparse_ranked = reciprocal_rank_fusion(sparse_ranked_lists)
-                # Re-cap at sparse_top_k after intra-sparse fusion
-                sparse_ranked = sparse_ranked[:sparse_top_k]
-            else:
-                sparse_ranked = []
+            if tfidf_ranked_lists:
+                tfidf_ranked = reciprocal_rank_fusion(tfidf_ranked_lists)[:sparse_top_k]
+            timing["tfidf"] = time.time() - t0
+        elif retrieval_mode in {"tfidf", "both"}:
+            logger.info("TF-IDF not available for selected mode")
+            timing["tfidf"] = 0.0
 
-            timing["sparse"] = time.time() - t0
-            logger.info(
-                f"Multi-query sparse: {len(sparse_queries_to_run)} queries → "
-                f"{len(sparse_ranked)} results"
-            )
-        else:
-            sparse_ranked = []
-            logger.info("TF-IDF not available, using dense-only retrieval")
-            timing["sparse"] = 0.0
+        # ── Step 3b: Sparse retrieval (BM25) — Multi-Query ──
+        bm25_ranked: list[tuple[str, float]] = []
+        bm25_ranked_lists: list[list[tuple[str, float]]] = []
+        if retrieval_mode in {"bm25", "both"} and self.bm25.is_built:
+            t0 = time.time()
+            for sq in sparse_queries_to_run:
+                result_list = self.bm25.search(sq, top_k=sparse_top_k)
+                if result_list:
+                    bm25_ranked_lists.append(result_list)
+
+            if bm25_ranked_lists:
+                bm25_ranked = reciprocal_rank_fusion(bm25_ranked_lists)[:sparse_top_k]
+            timing["bm25"] = time.time() - t0
+        elif retrieval_mode in {"bm25", "both"}:
+            logger.info("BM25 not available for selected mode")
+            timing["bm25"] = 0.0
+
+        timing["sparse"] = timing.get("tfidf", 0.0) + timing.get("bm25", 0.0)
+        logger.info(
+            f"Sparse mode={retrieval_mode}: queries={len(sparse_queries_to_run)} "
+            f"tfidf={len(tfidf_ranked)} bm25={len(bm25_ranked)}"
+        )
 
         # ── Step 4: RRF Fusion ──
         t0 = time.time()
 
         ranked_lists = [dense_ranked]
-        if sparse_ranked:
-            ranked_lists.append(sparse_ranked)
+        if tfidf_ranked:
+            ranked_lists.append(tfidf_ranked)
+        if bm25_ranked:
+            ranked_lists.append(bm25_ranked)
         
         fused = reciprocal_rank_fusion(ranked_lists)
         
@@ -421,8 +506,9 @@ class HybridRetriever:
         timing["total"] = time.time() - total_start
         
         logger.info(
+            f"mode={retrieval_mode}, "
             f"Hybrid retrieval: dense={len(dense_ranked)}, "
-            f"tfidf={len(sparse_ranked)}, fused={len(fused_hadiths)}, "
+            f"tfidf={len(tfidf_ranked)}, bm25={len(bm25_ranked)}, fused={len(fused_hadiths)}, "
             f"dedup_removed={dedup_removed}, "
             f"expansion_tokens={len(processed.expansion_tokens)}, "
             f"multi_queries={len(processed.multi_queries)}, "
@@ -433,7 +519,7 @@ class HybridRetriever:
             query=processed,
             hadiths=fused_hadiths,
             dense_count=len(dense_ranked),
-            sparse_count=len(sparse_ranked),
+            sparse_count=len(tfidf_ranked) + len(bm25_ranked),
             fused_count=len(fused_hadiths),
             dedup_removed=dedup_removed,
             timing=timing,

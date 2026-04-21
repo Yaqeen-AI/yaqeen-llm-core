@@ -18,10 +18,8 @@
 
 import logging
 import time
-import hashlib
-from typing import Optional
+from typing import Optional, Literal
 from dataclasses import dataclass, field
-from functools import lru_cache
 
 from pipeline.config import settings, resolve_grade_label
 from pipeline.embed_query import JinaQueryEmbedder
@@ -32,41 +30,6 @@ from retrieval.hybrid_retriever import HybridRetriever, HybridResult
 from retrieval.query_preprocessor import preprocess_query, QueryType
 
 logger = logging.getLogger(__name__)
-
-
-# ============================================================
-# LRU Cache for expensive operations
-# ============================================================
-
-class _EmbeddingCache:
-    """LRU cache for query embeddings (avoids repeated Jina API calls)."""
-    
-    def __init__(self, maxsize: int = 1000):
-        self._cache: dict[str, list[float]] = {}
-        self._order: list[str] = []
-        self._maxsize = maxsize
-    
-    def get(self, key: str) -> Optional[list[float]]:
-        if key in self._cache:
-            # Move to end (most recently used)
-            self._order.remove(key)
-            self._order.append(key)
-            return self._cache[key]
-        return None
-    
-    def put(self, key: str, value: list[float]) -> None:
-        if key in self._cache:
-            self._order.remove(key)
-        elif len(self._cache) >= self._maxsize:
-            # Evict least recently used
-            oldest = self._order.pop(0)
-            del self._cache[oldest]
-        self._cache[key] = value
-        self._order.append(key)
-    
-    @property
-    def size(self) -> int:
-        return len(self._cache)
 
 
 @dataclass
@@ -167,10 +130,13 @@ class HadithRAGPipeline:
     ):
         logger.info("Initializing Hadith RAG Pipeline...")
 
-        self.hybrid_retriever = hybrid_retriever or HybridRetriever()
+        self.hybrid_retriever = hybrid_retriever or HybridRetriever(
+            embedding_cache_size=cache_size,
+            embedding_cache_ttl_seconds=settings.EMBEDDING_CACHE_TTL_SECONDS,
+        )
         self.reranker = reranker or HadithReranker()
         self.generator = generator or HadithGenerator()
-        self._embedding_cache = _EmbeddingCache(maxsize=cache_size)
+        self._embedding_cache = self.hybrid_retriever.embedding_cache
 
         logger.info("✅ Hadith RAG Pipeline initialized successfully")
 
@@ -181,6 +147,7 @@ class HadithRAGPipeline:
         masdar_filter: Optional[str] = None,
         retrieval_top_k: Optional[int] = None,
         rerank_top_k: Optional[int] = None,
+        retrieval_mode: Literal["tfidf", "bm25", "both"] = "both",
         temperature: float = 0.3,
     ) -> RAGResponse:
         """
@@ -198,6 +165,7 @@ class HadithRAGPipeline:
             masdar_filter: Optional source book filter (Arabic name).
             retrieval_top_k: Override fused result count (default: 20).
             rerank_top_k: Override number of reranked results (default: 5).
+            retrieval_mode: Sparse retrieval mode (tfidf, bm25, both).
             temperature: LLM temperature (lower = more conservative, default: 0.3).
 
         Returns:
@@ -265,6 +233,7 @@ class HadithRAGPipeline:
             fused_top_k=retrieval_top_k or settings.RETRIEVAL_TOP_K,
             grade_filter=grade_filter,
             masdar_filter=masdar_filter,
+            retrieval_mode=retrieval_mode,
         )
         retrieved_hadiths = hybrid_result.hadiths
         timing["hybrid_retrieval"] = time.time() - t0

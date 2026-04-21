@@ -61,6 +61,7 @@ class Settings:
 
     # --- Caching ---
     EMBEDDING_CACHE_SIZE: int = int(os.getenv("EMBEDDING_CACHE_SIZE", "1000"))
+    EMBEDDING_CACHE_TTL_SECONDS: int = int(os.getenv("EMBEDDING_CACHE_TTL_SECONDS", "900"))
 
     # --- Gemini --- FREE
     GEMINI_API_KEY: str = os.getenv("GEMINI_API_KEY", "")
