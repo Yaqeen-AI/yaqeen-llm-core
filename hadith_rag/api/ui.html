@@ -9,8 +9,8 @@
 
     body {
       font-family: 'Segoe UI', Tahoma, Arial, sans-serif;
-      background: #0f1117;
-      color: #e2e8f0;
+      background: #f3f4f6;
+      color: #1f2937;
       min-height: 100vh;
       display: flex;
       flex-direction: column;
@@ -18,105 +18,134 @@
       padding: 2rem 1rem;
     }
 
+    .container {
+      width: 100%;
+      max-width: 840px;
+      background: #ffffff;
+      border: 1px solid #e5e7eb;
+      border-radius: 10px;
+      padding: 1.5rem;
+    }
+
     header {
       text-align: center;
-      margin-bottom: 2rem;
+      margin-bottom: 1.4rem;
     }
     header h1 {
-      font-size: 2rem;
-      color: #c9a96e;
-      letter-spacing: 0.05em;
+      font-size: 1.6rem;
+      color: #111827;
+      letter-spacing: 0;
+      font-weight: 600;
     }
     header p {
-      color: #718096;
-      margin-top: 0.4rem;
-      font-size: 0.9rem;
+      color: #6b7280;
+      margin-top: 0.35rem;
+      font-size: 0.92rem;
     }
 
     .search-box {
       width: 100%;
-      max-width: 720px;
+      max-width: 100%;
       display: flex;
       gap: 0.5rem;
+      align-items: center;
     }
     .search-box input {
       flex: 1;
       padding: 0.85rem 1.2rem;
-      border-radius: 10px;
-      border: 1px solid #2d3748;
-      background: #1a1f2e;
-      color: #e2e8f0;
+      border-radius: 6px;
+      border: 1px solid #d1d5db;
+      background: #ffffff;
+      color: #111827;
       font-size: 1rem;
       font-family: inherit;
       direction: rtl;
       outline: none;
       transition: border-color 0.2s;
     }
-    .search-box input:focus { border-color: #c9a96e; }
-    .search-box input::placeholder { color: #4a5568; }
+    .search-box input:focus {
+      border-color: #374151;
+      box-shadow: 0 0 0 2px #e5e7eb;
+    }
+    .search-box input::placeholder { color: #9ca3af; }
+
+    .search-box select {
+      padding: 0.85rem 0.8rem;
+      border-radius: 6px;
+      border: 1px solid #d1d5db;
+      background: #ffffff;
+      color: #111827;
+      font-size: 0.95rem;
+      font-family: inherit;
+      outline: none;
+      min-width: 130px;
+    }
+    .search-box select:focus {
+      border-color: #374151;
+      box-shadow: 0 0 0 2px #e5e7eb;
+    }
 
     .search-box button {
       padding: 0.85rem 1.6rem;
-      border-radius: 10px;
+      border-radius: 6px;
       border: none;
-      background: #c9a96e;
-      color: #0f1117;
+      background: #111827;
+      color: #ffffff;
       font-size: 1rem;
-      font-weight: 700;
+      font-weight: 600;
       cursor: pointer;
       transition: background 0.2s;
       white-space: nowrap;
     }
-    .search-box button:hover { background: #e0c080; }
-    .search-box button:disabled { background: #4a5568; cursor: not-allowed; }
+    .search-box button:hover { background: #1f2937; }
+    .search-box button:disabled { background: #9ca3af; cursor: not-allowed; }
 
     #status {
-      margin-top: 1.2rem;
+      margin-top: 1rem;
       font-size: 0.85rem;
-      color: #718096;
+      color: #6b7280;
       min-height: 1.2rem;
     }
 
     #result {
       width: 100%;
-      max-width: 720px;
-      margin-top: 1.5rem;
+      max-width: 100%;
+      margin-top: 1rem;
       display: flex;
       flex-direction: column;
-      gap: 1.2rem;
+      gap: 1rem;
     }
 
     .answer-card {
-      background: #1a1f2e;
-      border: 1px solid #2d3748;
-      border-right: 4px solid #c9a96e;
-      border-radius: 12px;
+      background: #ffffff;
+      border: 1px solid #e5e7eb;
+      border-radius: 6px;
       padding: 1.4rem 1.6rem;
-      line-height: 1.9;
+      line-height: 1.85;
       white-space: pre-wrap;
       font-size: 1rem;
     }
 
     .section-title {
       font-size: 0.75rem;
-      font-weight: 700;
-      color: #718096;
+      font-weight: 600;
+      color: #6b7280;
       text-transform: uppercase;
-      letter-spacing: 0.1em;
-      margin-bottom: 0.6rem;
+      letter-spacing: 0.08em;
+      margin-bottom: 0.5rem;
     }
 
     .hadith-card {
-      background: #1a1f2e;
-      border: 1px solid #2d3748;
-      border-radius: 10px;
-      padding: 1rem 1.2rem;
+      background: #ffffff;
+      border: 1px solid #e5e7eb;
+      border-radius: 6px;
+      padding: 0.9rem 1rem;
     }
     .hadith-card .matn {
       font-size: 0.95rem;
       line-height: 1.8;
-      margin-bottom: 0.6rem;
-      color: #e2e8f0;
+      margin-bottom: 0.5rem;
+      color: #111827;
     }
     .hadith-meta {
       display: flex;
@@ -126,30 +155,31 @@
     }
     .badge {
       padding: 0.2rem 0.6rem;
-      border-radius: 6px;
-      background: #2d3748;
-      color: #a0aec0;
+      border-radius: 3px;
+      background: #f3f4f6;
+      color: #4b5563;
+      border: 1px solid #e5e7eb;
     }
-    .badge.sahih  { background: #1a3a2a; color: #68d391; }
-    .badge.hasan  { background: #2a3a1a; color: #b7e278; }
-    .badge.daif   { background: #3a2a1a; color: #f6ad55; }
-    .badge.mawdu  { background: #3a1a1a; color: #fc8181; }
+    .badge.sahih  { background: #ecfdf3; color: #166534; border-color: #bbf7d0; }
+    .badge.hasan  { background: #f0fdf4; color: #3f6212; border-color: #d9f99d; }
+    .badge.daif   { background: #fffbeb; color: #92400e; border-color: #fde68a; }
+    .badge.mawdu  { background: #fef2f2; color: #991b1b; border-color: #fecaca; }
 
     .warnings {
-      background: #2a1e0f;
-      border: 1px solid #744210;
-      border-radius: 8px;
+      background: #fffbeb;
+      border: 1px solid #fcd34d;
+      border-radius: 6px;
       padding: 0.8rem 1rem;
       font-size: 0.85rem;
-      color: #f6ad55;
+      color: #92400e;
       line-height: 1.7;
     }
 
     .spinner {
       display: inline-block;
       width: 14px; height: 14px;
-      border: 2px solid #4a5568;
-      border-top-color: #c9a96e;
+      border: 2px solid #d1d5db;
+      border-top-color: #374151;
       border-radius: 50%;
       animation: spin 0.7s linear infinite;
       vertical-align: middle;
@@ -158,32 +188,55 @@
     @keyframes spin { to { transform: rotate(360deg); } }
 
     .error-msg {
-      background: #2a1010;
-      border: 1px solid #744040;
-      border-radius: 8px;
+      background: #fef2f2;
+      border: 1px solid #fecaca;
+      border-radius: 6px;
       padding: 0.8rem 1rem;
-      color: #fc8181;
+      color: #991b1b;
       font-size: 0.9rem;
+    }
+
+    @media (max-width: 780px) {
+      .container {
+        padding: 1rem;
+      }
+
+      .search-box {
+        flex-direction: column;
+        align-items: stretch;
+      }
+
+      .search-box select,
+      .search-box button {
+        width: 100%;
+      }
     }
   </style>
 </head>
 <body>
+<main class="container">
+  <header>
+    <h1>يقين — الحديث النبوي</h1>
+    <p>ابحث في الأحاديث واحصل على إجابة موثقة بالمصادر</p>
+  </header>
 
-<header>
-  <h1>يقين ✦ الحديث النبوي</h1>
-  <p>ابحث في 155,000+ حديث واحصل على إجابة موثقة بالمصادر</p>
-</header>
+  <div class="search-box">
+    <input id="queryInput" type="text" placeholder="اكتب سؤالك... مثال: ما صحة حديث من غشنا فليس منا" />
+    <select id="retrievalMode" aria-label="طريقة الاسترجاع">
+      <option value="both">TF-IDF + BM25</option>
+      <option value="tfidf">TF-IDF فقط</option>
+      <option value="bm25">BM25 فقط</option>
+    </select>
+    <button id="askBtn" onclick="ask()">سؤال</button>
+  </div>
 
-<div class="search-box">
-  <input id="queryInput" type="text" placeholder="اكتب سؤالك... مثال: ما صحة حديث من غشنا فليس منا" />
-  <button id="askBtn" onclick="ask()">سؤال</button>
-</div>
-
-<div id="status"></div>
-<div id="result"></div>
+  <div id="status"></div>
+  <div id="result"></div>
+</main>
 
 <script>
   const input  = document.getElementById('queryInput');
+  const retrievalMode = document.getElementById('retrievalMode');
   const btn    = document.getElementById('askBtn');
   const status = document.getElementById('status');
   const result = document.getElementById('result');
@@ -198,6 +251,7 @@
 
   async function ask() {
     const query = input.value.trim();
+    const mode = retrievalMode.value || 'both';
     if (!query) return;
 
     btn.disabled = true;
@@ -208,7 +262,7 @@
       const res = await fetch('/query', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ query })
+        body: JSON.stringify({ query, retrieval_mode: mode })
       });
 
       if (!res.ok) {
@@ -217,7 +271,7 @@
       }
 
       const data = await res.json();
-      status.textContent = `✅ اكتملت في ${(data.timing?.total || 0).toFixed(1)} ثانية`;
+      status.textContent = `اكتملت المعالجة في ${(data.timing?.total || 0).toFixed(1)} ثانية`;
 
       let html = '';
 
@@ -262,7 +316,7 @@
 
     } catch (e) {
       status.textContent = '';
-      result.innerHTML = `<div class="error-msg">❌ ${escHtml(e.message)}</div>`;
+      result.innerHTML = `<div class="error-msg">حدث خطأ: ${escHtml(e.message)}</div>`;
     } finally {
       btn.disabled = false;
     }

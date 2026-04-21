@@ -22,7 +22,7 @@
 import logging
 import time
 import uuid
-from typing import Optional
+from typing import Optional, Literal
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, HTTPException, Request
@@ -47,6 +47,10 @@ class QueryRequest(BaseModel):
     masdar_filter: Optional[str] = Field(None, description="Filter by source book name (Arabic)")
     top_k: Optional[int] = Field(None, ge=1, le=50, description="Number of results before reranking")
     rerank_top_k: Optional[int] = Field(None, ge=1, le=20, description="Number of results after reranking")
+    retrieval_mode: Literal["tfidf", "bm25", "both"] = Field(
+        "both",
+        description="Sparse retrieval mode: tfidf only, bm25 only, or both fused",
+    )
     temperature: float = Field(0.3, ge=0.0, le=1.0, description="Generation temperature")
 
 
@@ -56,6 +60,10 @@ class SearchRequest(BaseModel):
     grade_filter: Optional[list[str]] = Field(None, description="Filter by grade")
     masdar_filter: Optional[str] = Field(None, description="Filter by source book")
     top_k: Optional[int] = Field(None, ge=1, le=100, description="Number of results")
+    retrieval_mode: Literal["tfidf", "bm25", "both"] = Field(
+        "both",
+        description="Sparse retrieval mode: tfidf only, bm25 only, or both fused",
+    )
 
 
 class HadithResponse(BaseModel):
@@ -282,6 +290,7 @@ async def query_hadith(request: QueryRequest):
             masdar_filter=request.masdar_filter,
             retrieval_top_k=request.top_k,
             rerank_top_k=request.rerank_top_k,
+            retrieval_mode=request.retrieval_mode,
             temperature=request.temperature,
         )
         
@@ -391,6 +400,7 @@ async def search_hadiths(request: SearchRequest):
             fused_top_k=request.top_k or 20,
             grade_filter=request.grade_filter,
             masdar_filter=request.masdar_filter,
+            retrieval_mode=request.retrieval_mode,
         )
         
         # Rerank
