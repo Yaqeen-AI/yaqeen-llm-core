@@ -4,7 +4,7 @@ from pathlib import Path
 
 from pipeline.config import settings
 from pipeline.retrieve import HadithRetriever
-from retrieval.tfidf_service import TFIDFService
+from retrieval.bm25_service import BM25Service
 
 
 logger = logging.getLogger(__name__)
@@ -48,14 +48,33 @@ def _load_corpus_from_chroma(batch_size: int) -> tuple[list[str], list[str]]:
     return doc_ids, texts
 
 
+def build_bm25_index(
+    output_path: Path | None = None,
+    batch_size: int = 5000,
+) -> Path:
+    """Build and persist the local BM25 sparse index from ChromaDB documents."""
+    output_path = output_path or (settings.DATA_DIR / "bm25_index.pkl")
+
+    doc_ids, texts = _load_corpus_from_chroma(batch_size=batch_size)
+    if not doc_ids:
+        raise RuntimeError("No documents were loaded from ChromaDB; cannot build BM25 index.")
+
+    service = BM25Service()
+    service.build_index(doc_ids=doc_ids, texts=texts)
+    service.save(output_path)
+
+    logger.info("BM25 build complete: %s", output_path)
+    return output_path
+
+
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Build the local TF-IDF sparse index from ChromaDB documents.")
+    parser = argparse.ArgumentParser(description="Build the local BM25 sparse index from ChromaDB documents.")
     parser.add_argument("--batch-size", type=int, default=5000, help="Number of Chroma documents to read per batch.")
     parser.add_argument(
         "--output",
         type=Path,
-        default=Path(settings.TFIDF_INDEX_PATH),
-        help="Output path for the TF-IDF pickle file.",
+        default=settings.DATA_DIR / "bm25_index.pkl",
+        help="Output path for the BM25 pickle file.",
     )
     args = parser.parse_args()
 
@@ -64,16 +83,7 @@ def main() -> None:
         format="%(asctime)s [%(name)s] %(levelname)s: %(message)s",
     )
 
-    doc_ids, texts = _load_corpus_from_chroma(batch_size=args.batch_size)
-
-    if not doc_ids:
-        raise RuntimeError("No documents were loaded from ChromaDB; cannot build TF-IDF index.")
-
-    service = TFIDFService()
-    service.build_index(doc_ids=doc_ids, texts=texts)
-    service.save(args.output)
-
-    logger.info("TF-IDF build complete: %s", args.output)
+    build_bm25_index(output_path=args.output, batch_size=args.batch_size)
 
 
 if __name__ == "__main__":

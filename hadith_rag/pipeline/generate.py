@@ -15,6 +15,7 @@
 import json
 import logging
 import re
+from difflib import SequenceMatcher
 from typing import Optional
 from dataclasses import dataclass, field, asdict
 
@@ -77,7 +78,18 @@ SYSTEM_PROMPT_GENERAL = """أنت عالم متخصص في الحديث النب
 9. **مسائل الخلاف**: إذا كان السؤال يتعلق بمسألة فقهية فيها خلاف بين العلماء:
    - اعرض الأقوال المختلفة إن وُجدت في السياق
    - لا تنحاز لرأي واحد دون ذكر الآخر
-   - قل: "في هذه المسألة خلاف بين العلماء" إن كان ذلك واضحاً"""
+    - قل: "في هذه المسألة خلاف بين العلماء" إن كان ذلك واضحاً
+
+10. **الدقة وعدم التهويل**:
+    - لا تستخدم عبارات تعميمية مثل "عدة أحاديث" أو "كثيرة" إلا إذا كان العدد ظاهراً من السياق.
+    - الأفضل ذكر العدد بشكل صريح مثل: "ورد في النتائج حديثان...".
+
+11. **منع التكرار**:
+    - لا تكرر نفس الرواية أو نفس المعنى المكرر بصياغات متعددة.
+    - إذا تكررت روايات متقاربة جداً، اذكر الأقوى سنداً فقط ثم نبّه باختصار لوجود روايات مقاربة.
+
+12. **الأسئلة الحساسة**:
+    - عند الأسئلة التي قد تُفهم على أنها انتقاص من فئة من الناس، اذكر سطر توضيح منهجي مختصر يبيّن أن الفهم يكون في سياقه الشرعي واللغوي، دون خطاب جارح."""
 
 
 SYSTEM_PROMPT_METADATA = """أنت عالم متخصص في الحديث النبوي. المستخدم يسأل عن **بيانات وصفية** محددة لحديث معين (الراوي، الدرجة، المصدر، الرقم، المحدث، التصنيف).
@@ -187,6 +199,7 @@ def _build_intent_policy_prompt(answer_intent: AnswerIntent) -> str:
 5. إذا تعارضت الدرجة المختصرة مع الحكم التفصيلي فاعتبر الرواية غير صالحة للاحتجاج.
 6. لا تستعمل روايات أحكام الزكاة وتوزيعها لإثبات فضائل الصدقة إلا إذا كان وجه الاستدلال صريحاً في السياق.
 7. اكتب متن الجواب فقط؛ قسم كفاية الأدلة وقسم الروايات المستبعدة سيُضافان خارجياً.
+8. إن كانت الأدلة المتاحة محدودة، استخدم صياغة حذرة وتجنب الجزم الزائد.
 """
 
     if answer_intent == AnswerIntent.EXPLANATORY:
@@ -492,7 +505,10 @@ def _audit_hadiths_for_answer(
     return audited, ignored
 
 
-def _evaluate_retrieved_evidence(audited_hadiths: list[_AuditedHadith]) -> EvidenceEvaluation:
+def _evaluate_retrieved_evidence(
+    audited_hadiths: list[_AuditedHadith],
+    answer_intent: AnswerIntent,
+) -> EvidenceEvaluation:
     """Compute authenticity, relevance, and final sufficiency."""
     authentic_hadiths = [item for item in audited_hadiths if item.is_authentic]
     direct_hadiths = [item for item in audited_hadiths if item.is_directly_relevant]
@@ -506,7 +522,11 @@ def _evaluate_retrieved_evidence(audited_hadiths: list[_AuditedHadith]) -> Evide
     else:
         relevance = "weak"
 
-    if direct_hadiths:
+    minimum_direct_for_sufficient = 1
+    if answer_intent in {AnswerIntent.EXPLANATORY, AnswerIntent.COLLECTION}:
+        minimum_direct_for_sufficient = 2
+
+    if len(direct_hadiths) >= minimum_direct_for_sufficient:
         final_sufficiency = "sufficient"
     elif authentic_hadiths:
         final_sufficiency = "partial"
@@ -525,7 +545,11 @@ def _build_citations(
 ) -> list[Citation]:
     """Build citation objects from provided hadiths."""
     citations = []
+    seen_ids: set[str] = set()
     for i, h in enumerate(hadiths, 1):
+        if h.id in seen_ids:
+            continue
+        seen_ids.add(h.id)
         canonical_grade = resolve_grade_bucket(h.grade, h.grade_ar, h.ruling)
         grade_ar = resolve_grade_label(h.grade, h.grade_ar, h.ruling)
         citations.append(Citation(
@@ -561,6 +585,118 @@ def _order_hadiths_for_generation(
         indexed.sort(key=lambda item: (grade_priority(resolve_grade_bucket(item[1].grade, item[1].grade_ar, item[1].ruling)), item[0]))
         return [hadith for _, hadith in indexed]
     return hadiths
+
+
+def _normalize_hadith_text_for_dedup(text: str) -> str:
+    """Normalize hadith text so near-identical narrations can be de-duplicated."""
+    normalized = str(text or "").strip().lower()
+    normalized = re.sub(r"[\u0610-\u061A\u064B-\u065F\u0670\u06D6-\u06ED]", "", normalized)
+    normalized = re.sub(r"[أإآٱ]", "ا", normalized)
+    normalized = re.sub(r"\s+", " ", normalized)
+    return normalized
+
+
+def _tokenize_for_similarity(text: str) -> set[str]:
+    """Tokenize normalized hadith text for lightweight similarity matching."""
+    tokens = set()
+    for token in _normalize_hadith_text_for_dedup(text).split():
+        cleaned = re.sub(r"[^\u0600-\u06FFa-z0-9]", "", token)
+        if len(cleaned) >= 3:
+            tokens.add(cleaned)
+    return tokens
+
+
+def _token_jaccard_similarity(tokens_a: set[str], tokens_b: set[str]) -> float:
+    """Compute Jaccard similarity between two token sets."""
+    if not tokens_a or not tokens_b:
+        return 0.0
+    intersection = len(tokens_a & tokens_b)
+    union = len(tokens_a | tokens_b)
+    if union == 0:
+        return 0.0
+    return intersection / union
+
+
+def _token_overlap_similarity(tokens_a: set[str], tokens_b: set[str]) -> float:
+    """Compute overlap coefficient: intersection over smaller set size."""
+    if not tokens_a or not tokens_b:
+        return 0.0
+    intersection = len(tokens_a & tokens_b)
+    return intersection / min(len(tokens_a), len(tokens_b))
+
+
+def _are_near_duplicate_narrations(text_a: str, text_b: str) -> bool:
+    """Heuristic check to collapse closely-related narrations across different books/chains."""
+    norm_a = _normalize_hadith_text_for_dedup(text_a)
+    norm_b = _normalize_hadith_text_for_dedup(text_b)
+
+    if not norm_a or not norm_b:
+        return False
+
+    if norm_a == norm_b:
+        return True
+
+    seq_ratio = SequenceMatcher(None, norm_a, norm_b).ratio()
+    if seq_ratio >= 0.72:
+        return True
+
+    if "ناقصات عقل ودين" in norm_a and "ناقصات عقل ودين" in norm_b:
+        return True
+
+    anchor_phrases = (
+        "ناقصات عقل ودين",
+        "شهادة امراتين",
+        "نقصان عقل",
+        "نقصان دين",
+        "تكثرن اللعن",
+        "تكفرن العشير",
+    )
+    shared_anchor_count = sum(1 for phrase in anchor_phrases if phrase in norm_a and phrase in norm_b)
+    if shared_anchor_count >= 2:
+        return True
+
+    tokens_a = _tokenize_for_similarity(norm_a)
+    tokens_b = _tokenize_for_similarity(norm_b)
+    jaccard = _token_jaccard_similarity(tokens_a, tokens_b)
+    overlap = _token_overlap_similarity(tokens_a, tokens_b)
+
+    if overlap >= 0.72:
+        return True
+
+    return overlap >= 0.62 and jaccard >= 0.45
+
+
+def _hadith_representative_rank(hadith: RetrievedHadith) -> tuple[int, float, int]:
+    """Lower rank is better for choosing one representative narration per cluster."""
+    return (
+        grade_priority(resolve_grade_bucket(hadith.grade, hadith.grade_ar, hadith.ruling)),
+        float(hadith.distance or 1.0),
+        -len(str(hadith.text_ar or "")),
+    )
+
+
+def _deduplicate_hadiths_for_answer(hadiths: list[RetrievedHadith]) -> list[RetrievedHadith]:
+    """Drop obvious duplicate narrations to avoid repeated evidence blocks in final answer."""
+    if not hadiths:
+        return []
+
+    clusters: list[list[RetrievedHadith]] = []
+    for hadith in hadiths:
+        assigned = False
+        for cluster in clusters:
+            if _are_near_duplicate_narrations(hadith.text_ar, cluster[0].text_ar):
+                cluster.append(hadith)
+                assigned = True
+                break
+        if not assigned:
+            clusters.append([hadith])
+
+    representatives: list[RetrievedHadith] = []
+    for cluster in clusters:
+        best = min(cluster, key=_hadith_representative_rank)
+        representatives.append(best)
+
+    return representatives
 
 
 def _format_hadith_block(
@@ -959,9 +1095,10 @@ class HadithGenerator:
             )
 
         audited_hadiths, ignored_narrations = _audit_hadiths_for_answer(query, hadiths)
-        evaluation = _evaluate_retrieved_evidence(audited_hadiths)
+        evaluation = _evaluate_retrieved_evidence(audited_hadiths, answer_intent)
         direct_hadiths = [item.hadith for item in audited_hadiths if item.is_directly_relevant]
-        ordered_direct_hadiths = _order_hadiths_for_generation(direct_hadiths, answer_intent)
+        deduplicated_direct_hadiths = _deduplicate_hadiths_for_answer(direct_hadiths)
+        ordered_direct_hadiths = _order_hadiths_for_generation(deduplicated_direct_hadiths, answer_intent)
         evidence_sufficient = evaluation.final_sufficiency == "sufficient"
 
         # Build citations
@@ -1021,6 +1158,16 @@ class HadithGenerator:
 
 ## سؤال المستخدم:
 {query}"""
+
+        duplicate_collapsed_count = max(0, len(direct_hadiths) - len(ordered_direct_hadiths))
+        if duplicate_collapsed_count > 0:
+            user_message += (
+                "\n\n## تنبيه مهم لأسلوب العرض:\n"
+                "بعض النتائج كانت روايات متقاربة جداً في المعنى والنص لنفس الخبر. "
+                "لا تعرضها كأحاديث مستقلة متعددة أمام المستخدم. "
+                "اكتف بتمثيل موجز غير مُرقم على أنها روايات متعددة لخبر واحد عند اللزوم، "
+                "واذكر فقط الروايات الأوضح والأقوى دون تعدادٍ طويل."
+            )
 
         # For explain_hadith queries: add a relevance hint so the LLM knows
         # whether the specific hadith was found in the corpus

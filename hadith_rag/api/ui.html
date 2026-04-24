@@ -122,17 +122,68 @@
       border-radius: 6px;
       padding: 1.4rem 1.6rem;
       line-height: 1.85;
-      white-space: pre-wrap;
+      white-space: normal;
       font-size: 1rem;
+    }
+
+    .answer-body p {
+      margin: 0 0 0.8rem;
+      color: #111827;
+    }
+    .answer-body p:last-child {
+      margin-bottom: 0;
+    }
+    .answer-body ul,
+    .answer-body ol {
+      margin: 0.2rem 1.1rem 0.9rem 0;
+      padding: 0;
+    }
+    .answer-body li {
+      margin-bottom: 0.45rem;
+    }
+    .answer-body h3 {
+      font-size: 1rem;
+      margin: 0.3rem 0 0.7rem;
+      color: #111827;
+      font-weight: 700;
     }
 
     .section-title {
       font-size: 0.75rem;
       font-weight: 600;
       color: #6b7280;
-      text-transform: uppercase;
       letter-spacing: 0.08em;
       margin-bottom: 0.5rem;
+    }
+
+    .meta-card {
+      background: #f9fafb;
+      border: 1px solid #e5e7eb;
+      border-radius: 6px;
+      padding: 0.9rem 1rem;
+    }
+    .meta-grid {
+      display: grid;
+      gap: 0.5rem;
+      grid-template-columns: repeat(auto-fit, minmax(170px, 1fr));
+    }
+    .meta-item {
+      background: #ffffff;
+      border: 1px solid #e5e7eb;
+      border-radius: 6px;
+      padding: 0.55rem 0.7rem;
+      font-size: 0.86rem;
+      line-height: 1.55;
+    }
+    .meta-item .label {
+      color: #6b7280;
+      display: block;
+      font-size: 0.75rem;
+      margin-bottom: 0.2rem;
+    }
+    .meta-item .value {
+      color: #111827;
+      font-weight: 600;
     }
 
     .hadith-card {
@@ -275,12 +326,26 @@
 
       let html = '';
 
+      // Evidence quality block
+      html += `
+        <div>
+          <div class="section-title">جودة الأدلة</div>
+          <div class="meta-card">
+            <div class="meta-grid">
+              <div class="meta-item"><span class="label">توثيق الأدلة</span><span class="value">${escHtml(toArabicSignal(data.authenticity_of_evidence))}</span></div>
+              <div class="meta-item"><span class="label">صلة الأدلة بالسؤال</span><span class="value">${escHtml(toArabicSignal(data.relevance_to_question))}</span></div>
+              <div class="meta-item"><span class="label">الكفاية النهائية</span><span class="value">${escHtml(toArabicSignal(data.final_sufficiency))}</span></div>
+            </div>
+          </div>
+        </div>`;
+
       // Answer
       if (data.answer) {
+        const cleanedAnswer = cleanupAnswerText(data.answer);
         html += `
           <div>
             <div class="section-title">الإجابة</div>
-            <div class="answer-card">${escHtml(data.answer)}</div>
+            <div class="answer-card answer-body">${formatAnswerHtml(cleanedAnswer)}</div>
           </div>`;
       }
 
@@ -312,6 +377,24 @@
           </div>`;
       }
 
+      if (data.ignored_narrations?.length) {
+        const ignored = data.ignored_narrations.map((item, i) => `
+          <div class="hadith-card">
+            <div class="matn">${escHtml(item.matn_snippet || '')}</div>
+            <div class="hadith-meta">
+              <span class="badge">#${i + 1}</span>
+              <span class="badge">الدرجة: ${escHtml(item.grade_ar || item.grade || 'غير محدد')}</span>
+              <span class="badge">سبب الاستبعاد: ${escHtml(item.reason || '—')}</span>
+            </div>
+          </div>`).join('');
+
+        html += `
+          <div>
+            <div class="section-title">الروايات المستبعدة (${data.ignored_narrations.length})</div>
+            ${ignored}
+          </div>`;
+      }
+
       result.innerHTML = html;
 
     } catch (e) {
@@ -326,6 +409,95 @@
     return String(str ?? '')
       .replace(/&/g,'&amp;').replace(/</g,'&lt;')
       .replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+  }
+
+  function toArabicSignal(value) {
+    const key = String(value || '').trim().toLowerCase();
+    const map = {
+      sufficient: 'كافٍ',
+      insufficient: 'غير كافٍ',
+      direct: 'مباشرة',
+      weak: 'ضعيفة',
+      partial: 'جزئية'
+    };
+    return map[key] || value || 'غير متاح';
+  }
+
+  function cleanupAnswerText(text) {
+    let out = String(text || '').replace(/\r\n/g, '\n').trim();
+
+    out = out.replace(/^\s*Authenticity of evidence\s*:\s*.*$/gim, '');
+    out = out.replace(/^\s*Relevance to question\s*:\s*.*$/gim, '');
+    out = out.replace(/^\s*Final sufficiency\s*:\s*.*$/gim, '');
+    out = out.replace(/^\s*Answer\s*:\s*/gim, '');
+    out = out.replace(/(?:\n|^)\s*Excluded narrations\s*:[\s\S]*$/i, '');
+
+    out = out.replace(/\n{3,}/g, '\n\n').trim();
+    return out;
+  }
+
+  function formatInline(text) {
+    let safe = escHtml(text || '');
+    safe = safe.replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>');
+    safe = safe.replace(/`([^`]+)`/g, '<code>$1</code>');
+    return safe;
+  }
+
+  function formatAnswerHtml(text) {
+    const lines = String(text || '').split('\n');
+    const html = [];
+    let listType = null;
+
+    const closeList = () => {
+      if (listType) {
+        html.push(`</${listType}>`);
+        listType = null;
+      }
+    };
+
+    for (const rawLine of lines) {
+      const line = rawLine.trim();
+
+      if (!line) {
+        closeList();
+        continue;
+      }
+
+      const headingMatch = line.match(/^\*\*(.+?)\*\*:?$/);
+      if (headingMatch) {
+        closeList();
+        html.push(`<h3>${formatInline(headingMatch[1])}</h3>`);
+        continue;
+      }
+
+      const bulletMatch = line.match(/^[-*]\s+(.+)$/);
+      if (bulletMatch) {
+        if (listType !== 'ul') {
+          closeList();
+          listType = 'ul';
+          html.push('<ul>');
+        }
+        html.push(`<li>${formatInline(bulletMatch[1])}</li>`);
+        continue;
+      }
+
+      const numberedMatch = line.match(/^\d+[\.)]\s+(.+)$/);
+      if (numberedMatch) {
+        if (listType !== 'ol') {
+          closeList();
+          listType = 'ol';
+          html.push('<ol>');
+        }
+        html.push(`<li>${formatInline(numberedMatch[1])}</li>`);
+        continue;
+      }
+
+      closeList();
+      html.push(`<p>${formatInline(line)}</p>`);
+    }
+
+    closeList();
+    return html.length ? html.join('') : '<p>لا توجد إجابة نصية.</p>';
   }
 </script>
 </body>

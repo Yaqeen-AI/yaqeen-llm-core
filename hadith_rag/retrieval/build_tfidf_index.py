@@ -48,6 +48,25 @@ def _load_corpus_from_chroma(batch_size: int) -> tuple[list[str], list[str]]:
     return doc_ids, texts
 
 
+def build_tfidf_index(
+    output_path: Path | None = None,
+    batch_size: int = 5000,
+) -> Path:
+    """Build and persist the local TF-IDF sparse index from ChromaDB documents."""
+    output_path = output_path or Path(settings.TFIDF_INDEX_PATH)
+
+    doc_ids, texts = _load_corpus_from_chroma(batch_size=batch_size)
+    if not doc_ids:
+        raise RuntimeError("No documents were loaded from ChromaDB; cannot build TF-IDF index.")
+
+    service = TFIDFService()
+    service.build_index(doc_ids=doc_ids, texts=texts)
+    service.save(output_path)
+
+    logger.info("TF-IDF build complete: %s", output_path)
+    return output_path
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Build the local TF-IDF sparse index from ChromaDB documents.")
     parser.add_argument("--batch-size", type=int, default=5000, help="Number of Chroma documents to read per batch.")
@@ -64,16 +83,7 @@ def main() -> None:
         format="%(asctime)s [%(name)s] %(levelname)s: %(message)s",
     )
 
-    doc_ids, texts = _load_corpus_from_chroma(batch_size=args.batch_size)
-
-    if not doc_ids:
-        raise RuntimeError("No documents were loaded from ChromaDB; cannot build TF-IDF index.")
-
-    service = TFIDFService()
-    service.build_index(doc_ids=doc_ids, texts=texts)
-    service.save(args.output)
-
-    logger.info("TF-IDF build complete: %s", args.output)
+    build_tfidf_index(output_path=args.output, batch_size=args.batch_size)
 
 
 if __name__ == "__main__":

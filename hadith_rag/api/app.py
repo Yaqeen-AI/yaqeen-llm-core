@@ -116,28 +116,28 @@ class QueryResponse(BaseModel):
     authenticity_of_evidence: str = "insufficient"
     relevance_to_question: str = "weak"
     final_sufficiency: str = "insufficient"
-    citations: list[CitationResponse] = []
-    ignored_narrations: list[IgnoredNarrationResponse] = []
-    warnings: list[str] = []
+    citations: list[CitationResponse] = Field(default_factory=list)
+    ignored_narrations: list[IgnoredNarrationResponse] = Field(default_factory=list)
+    warnings: list[str] = Field(default_factory=list)
     grounding_verified: bool = False
-    hadiths: list[HadithResponse] = []
-    timing: dict = {}
+    hadiths: list[HadithResponse] = Field(default_factory=list)
+    timing: dict = Field(default_factory=dict)
 
 
 class SearchResponse(BaseModel):
     """Response body for /search endpoint."""
     request_id: str
     query: str
-    hadiths: list[HadithResponse] = []
+    hadiths: list[HadithResponse] = Field(default_factory=list)
     total: int = 0
-    timing: dict = {}
+    timing: dict = Field(default_factory=dict)
 
 
 class HealthResponse(BaseModel):
     """Response body for /health endpoint."""
     status: str
     version: str = "1.0.0"
-    components: dict = {}
+    components: dict = Field(default_factory=dict)
 
 
 class StatsResponse(BaseModel):
