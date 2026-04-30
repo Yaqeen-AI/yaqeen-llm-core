@@ -13,7 +13,7 @@ This is a LangGraph-based multi-agent routing pipeline. It uses a supervisor age
 Navigate to the project folder in your terminal.
 
 **2. Create a Virtual Environment (Recommended)**
-```bash
+
 python -m venv venv
 # Activate on Windows:
 venv\Scripts\activate
@@ -34,25 +34,24 @@ source venv/bin/activate
                             ├─ simple → direct route
                             └─ complex → Manager
                                                      ↓
-                                    Task Decomposition
+                                          Task Decomposition
                                                       ↓
-                            ┌────────┼────────┐
-                              ↓                        ↓                        ↓
-                Worker A                Worker B            Worker C
-                (Quran RAG)      (Hadith RAG)     (Fiqh RAG)
-                            └─────────┼────────┘
-                                                         ↓
-                                      Inspector / Reranker
-                                    ├─ reject → re-search
-                                    └─ approve → Context Compression
-                                                               ↓
-                                                  Writer / Synthesis
-                                                               ↓
-                                                     Final Answer
+                            ┌─────────────────────────┼──────────────────────────┐
+                            ↓                         ↓                          ↓
+                         Worker A                  Worker B                   Worker C
+                       (Quran RAG)               (Hadith RAG)               (Fiqh RAG)
+                            └─────────────────────────┼──────────────────────────┘
+                                                      ↓
+                                            Inspector / Reranker
+                                          ├─ reject → re-search
+                                          └─ approve → Context Compression
+                                                      ↓
+                                               Writer / Synthesis
+                                                       ↓
+                                                  Final Answer
 
 
-
-                                                     # **How our Query Router works?**
+# **How our Query Router works?**
 
 **Step 1 — Semantic Caching (The "FAQ" Board):**
 
