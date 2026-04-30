@@ -6,8 +6,8 @@ from supervisor import supervisor_node
 from memory import memory_management_node
 from manager import manager_node
 from workers.quran_agent import quran_agent_node
-# from workers.hadith_agent import hadith_agent_node
-# from workers.fiqh_agent import fiqh_agent_node
+from workers.hadith_agent import hadith_agent_node
+from workers.fiqh_agent import fiqh_agent_node
 from workers.direct_answer import direct_answer_node
 from inspector import inspector_node
 from compressor import compression_node
@@ -19,6 +19,8 @@ workflow.add_node("supervisor", supervisor_node)
 workflow.add_node("memory_flush", memory_management_node)
 workflow.add_node("manager", manager_node)
 workflow.add_node("quran_agent", quran_agent_node)
+workflow.add_node("hadith_agent", hadith_agent_node)
+workflow.add_node("fiqh_agent", fiqh_agent_node)
 workflow.add_node("direct_answer", direct_answer_node)
 workflow.add_node("inspector", inspector_node)
 workflow.add_node("compressor", compression_node)
@@ -34,10 +36,12 @@ workflow.add_edge("supervisor", "memory_flush")
 workflow.add_edge("memory_flush", "manager")
 workflow.add_conditional_edges("manager", route_from_manager)
 
+# 3. Direct all RAG agents to the inspector node
 workflow.add_edge("quran_agent", "inspector")
-# Add edges for hadith and fiqh here
-workflow.add_edge("direct_answer", "writer")
+workflow.add_edge("hadith_agent", "inspector")
+workflow.add_edge("fiqh_agent", "inspector")
 
+workflow.add_edge("direct_answer", "writer")
 workflow.add_edge("inspector", "compressor")
 workflow.add_edge("compressor", "writer")
 workflow.add_edge("writer", END)
