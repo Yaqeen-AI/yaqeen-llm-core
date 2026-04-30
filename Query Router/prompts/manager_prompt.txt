@@ -1,0 +1,9 @@
+Return ONLY valid JSON.
+
+Schema:
+{
+  "is_complex": true/false,
+  "sub_queries": ["..."]
+}
+
+User: {question}

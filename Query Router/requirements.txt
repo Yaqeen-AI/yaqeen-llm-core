@@ -1,0 +1,13 @@
+torch
+transformers
+accelerate
+langchain
+langgraph
+langchain-core
+langchain-community
+langchain-huggingface
+sentence-transformers
+faiss-cpu
+pydantic
+huggingface-hub
+python-dotenv
