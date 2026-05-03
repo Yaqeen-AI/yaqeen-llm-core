@@ -22,6 +22,7 @@
 # in retriever i.
 
 import logging
+import re
 import time
 from collections import OrderedDict
 from pathlib import Path
@@ -30,6 +31,7 @@ from typing import Optional, Literal
 from dataclasses import dataclass, field
 
 from pipeline.config import resolve_grade_bucket, settings
+from pipeline.answer_policy import grade_priority
 from pipeline.embed_query import JinaQueryEmbedder
 from pipeline.retrieve import HadithRetriever, RetrievedHadith, RetrievalResult
 from retrieval.bm25_service import BM25Service, get_bm25_service
@@ -37,6 +39,28 @@ from retrieval.tfidf_service import TFIDFService, get_tfidf_service
 from retrieval.query_preprocessor import preprocess_query, ProcessedQuery
 
 logger = logging.getLogger(__name__)
+
+
+_SOURCE_NORMALIZER = re.compile(r"[\u0610-\u061A\u064B-\u065F\u0670\u06D6-\u06ED\u0640]+")
+_SOURCE_WHITESPACE = re.compile(r"\s+")
+
+
+def _normalize_source_name(source: str) -> str:
+    text = _SOURCE_NORMALIZER.sub("", str(source or "").strip().lower())
+    text = text.replace("أ", "ا").replace("إ", "ا").replace("آ", "ا").replace("ٱ", "ا")
+    return _SOURCE_WHITESPACE.sub(" ", text).strip()
+
+
+def _source_priority(masdar: str) -> int:
+    normalized = _normalize_source_name(masdar)
+
+    if "صحيح البخاري" in normalized or normalized == "البخاري" or "bukhari" in normalized:
+        return 0
+
+    if "صحيح مسلم" in normalized or normalized == "مسلم" or "muslim" in normalized:
+        return 1
+
+    return 2
 
 
 class EmbeddingCache:
@@ -158,21 +182,29 @@ def deduplicate_by_canonical_group(
     Returns:
         Tuple of (deduplicated hadiths, number removed)
     """
-    seen_groups: set[str] = set()
-    deduped: list[RetrievedHadith] = []
-    removed = 0
-    
-    for hadith in hadiths:
-        # Use canonical_group_id from the dataclass field
+    grouped: dict[str, list[tuple[int, RetrievedHadith]]] = {}
+
+    for index, hadith in enumerate(hadiths):
         group_id = hadith.canonical_group_id if hadith.canonical_group_id else hadith.id
-        
-        if group_id in seen_groups:
-            removed += 1
-            continue
-        
-        seen_groups.add(group_id)
-        deduped.append(hadith)
-    
+        grouped.setdefault(group_id, []).append((index, hadith))
+
+    deduped_with_order: list[tuple[int, RetrievedHadith]] = []
+    removed = 0
+
+    for members in grouped.values():
+        selected_index, selected_hadith = min(
+            members,
+            key=lambda item: (
+                _source_priority(item[1].masdar),
+                grade_priority(item[1].grade),
+                item[1].distance,
+                item[0],
+            ),
+        )
+        removed += len(members) - 1
+        deduped_with_order.append((selected_index, selected_hadith))
+
+    deduped = [hadith for _, hadith in sorted(deduped_with_order, key=lambda item: item[0])]
     return deduped, removed
 
 

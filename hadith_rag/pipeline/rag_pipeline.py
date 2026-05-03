@@ -17,6 +17,7 @@
 #   - Metadata-focused generation for metadata queries
 
 import logging
+import re
 import time
 from typing import Optional, Literal
 from dataclasses import dataclass, field
@@ -30,6 +31,84 @@ from retrieval.hybrid_retriever import HybridRetriever, HybridResult
 from retrieval.query_preprocessor import preprocess_query, QueryType
 
 logger = logging.getLogger(__name__)
+
+_PRIMARY_SOURCE_BOOKS = ("صحيح البخاري", "صحيح مسلم")
+_TASHKEEL = re.compile(r"[\u0610-\u061A\u064B-\u065F\u0670\u06D6-\u06ED]+")
+_TATWEEL = re.compile(r"\u0640+")
+_WHITESPACE = re.compile(r"\s+")
+_ALEF_VARIANTS = re.compile(r"[أإآٱ]")
+
+
+def _normalize_source_name(source: str) -> str:
+    normalized = _TASHKEEL.sub("", str(source or "").strip().lower())
+    normalized = _TATWEEL.sub("", normalized)
+    normalized = _ALEF_VARIANTS.sub("ا", normalized)
+    return _WHITESPACE.sub(" ", normalized).strip()
+
+
+def _source_priority(masdar: str) -> int:
+    normalized = _normalize_source_name(masdar)
+    if "صحيح البخاري" in normalized or normalized == "البخاري" or "bukhari" in normalized:
+        return 0
+    if "صحيح مسلم" in normalized or normalized == "مسلم" or "muslim" in normalized:
+        return 1
+    return 2
+
+
+def _is_primary_source(hadith: RetrievedHadith) -> bool:
+    return _source_priority(hadith.masdar) < 2
+
+
+def _promote_primary_sources(hadiths: list[RetrievedHadith]) -> list[RetrievedHadith]:
+    indexed = list(enumerate(hadiths))
+    indexed.sort(key=lambda item: (_source_priority(item[1].masdar), item[0]))
+    return [hadith for _, hadith in indexed]
+
+
+def _merge_with_primary_candidates(
+    base_hadiths: list[RetrievedHadith],
+    primary_hadiths: list[RetrievedHadith],
+    limit: int,
+) -> list[RetrievedHadith]:
+    if not primary_hadiths:
+        return base_hadiths[:limit]
+
+    merged: list[RetrievedHadith] = []
+    seen_ids: set[str] = set()
+
+    for hadith in _promote_primary_sources(primary_hadiths) + base_hadiths:
+        if hadith.id in seen_ids:
+            continue
+        merged.append(hadith)
+        seen_ids.add(hadith.id)
+        if len(merged) >= limit:
+            break
+
+    return merged
+
+
+def _ensure_primary_in_reranked(
+    reranked_hadiths: list[RetrievedHadith],
+    retrieval_candidates: list[RetrievedHadith],
+) -> list[RetrievedHadith]:
+    if not reranked_hadiths:
+        return reranked_hadiths
+
+    if any(_is_primary_source(hadith) for hadith in reranked_hadiths):
+        return _promote_primary_sources(reranked_hadiths)
+
+    fallback_primary = next((hadith for hadith in retrieval_candidates if _is_primary_source(hadith)), None)
+    if fallback_primary is None:
+        return reranked_hadiths
+
+    forced = [fallback_primary]
+    for hadith in reranked_hadiths:
+        if hadith.id == fallback_primary.id:
+            continue
+        forced.append(hadith)
+        if len(forced) >= len(reranked_hadiths):
+            break
+    return forced
 
 
 @dataclass
@@ -236,6 +315,29 @@ class HadithRAGPipeline:
             retrieval_mode=retrieval_mode,
         )
         retrieved_hadiths = hybrid_result.hadiths
+
+        if not masdar_filter and not any(_is_primary_source(hadith) for hadith in retrieved_hadiths):
+            try:
+                primary_result = self.hybrid_retriever.retrieve(
+                    query=user_query,
+                    fused_top_k=max(retrieval_top_k or settings.RETRIEVAL_TOP_K, settings.RERANK_TOP_K * 2),
+                    grade_filter=grade_filter,
+                    masdar_filter=list(_PRIMARY_SOURCE_BOOKS),
+                    retrieval_mode=retrieval_mode,
+                )
+                if primary_result.hadiths:
+                    retrieved_hadiths = _merge_with_primary_candidates(
+                        base_hadiths=retrieved_hadiths,
+                        primary_hadiths=primary_result.hadiths,
+                        limit=retrieval_top_k or settings.RETRIEVAL_TOP_K,
+                    )
+                    logger.info(
+                        f"Primary-source injection added {len(primary_result.hadiths)} "
+                        "candidate(s) from Sahih Bukhari/Muslim"
+                    )
+            except Exception as exc:
+                logger.warning(f"Primary-source injection skipped due to retrieval error: {exc}")
+
         timing["hybrid_retrieval"] = time.time() - t0
         timing.update({f"retrieval_{k}": v for k, v in hybrid_result.timing.items()})
 
@@ -283,6 +385,7 @@ class HadithRAGPipeline:
             candidates=retrieved_hadiths,
             top_k=rerank_top_k,
         )
+        reranked_hadiths = _ensure_primary_in_reranked(reranked_hadiths, retrieved_hadiths)
         timing["rerank"] = time.time() - t0
 
         # ──────────────────────────────────────────────

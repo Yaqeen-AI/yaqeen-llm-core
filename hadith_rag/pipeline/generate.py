@@ -416,11 +416,29 @@ _CHARITY_VIRTUE_TERMS = (
 )
 
 
+_SOURCE_PRIORITY_RULES = (
+    ("صحيح البخاري", 0),
+    ("البخاري", 0),
+    ("bukhari", 0),
+    ("صحيح مسلم", 1),
+    ("مسلم", 1),
+    ("muslim", 1),
+)
+
+
 def _normalize_audit_text(text: str) -> str:
     text = _TASHKEEL.sub("", str(text or "").strip().lower())
     text = _TATWEEL.sub("", text)
     text = _ALEF_VARIANTS.sub("ا", text)
     return _WHITESPACE.sub(" ", text).strip()
+
+
+def _source_priority(masdar: str) -> int:
+    normalized = _normalize_audit_text(masdar)
+    for needle, priority in _SOURCE_PRIORITY_RULES:
+        if needle in normalized:
+            return priority
+    return 2
 
 
 def _is_charity_virtue_query(query: str) -> bool:
@@ -580,11 +598,19 @@ def _order_hadiths_for_generation(
     answer_intent: AnswerIntent,
 ) -> list[RetrievedHadith]:
     """Order hadiths for safer presentation without discarding relevant hits."""
+    indexed = list(enumerate(hadiths))
+    indexed.sort(
+        key=lambda item: (
+            _source_priority(item[1].masdar),
+            grade_priority(resolve_grade_bucket(item[1].grade, item[1].grade_ar, item[1].ruling)),
+            item[0],
+        )
+    )
+
     if answer_intent in {AnswerIntent.EXPLANATORY, AnswerIntent.COLLECTION}:
-        indexed = list(enumerate(hadiths))
-        indexed.sort(key=lambda item: (grade_priority(resolve_grade_bucket(item[1].grade, item[1].grade_ar, item[1].ruling)), item[0]))
         return [hadith for _, hadith in indexed]
-    return hadiths
+
+    return [hadith for _, hadith in indexed]
 
 
 def _normalize_hadith_text_for_dedup(text: str) -> str:
@@ -669,6 +695,7 @@ def _are_near_duplicate_narrations(text_a: str, text_b: str) -> bool:
 def _hadith_representative_rank(hadith: RetrievedHadith) -> tuple[int, float, int]:
     """Lower rank is better for choosing one representative narration per cluster."""
     return (
+        _source_priority(hadith.masdar),
         grade_priority(resolve_grade_bucket(hadith.grade, hadith.grade_ar, hadith.ruling)),
         float(hadith.distance or 1.0),
         -len(str(hadith.text_ar or "")),
