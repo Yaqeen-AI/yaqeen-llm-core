@@ -39,8 +39,11 @@ _COLLECTION_PATTERNS = [
         r"\bجميع\b",
         r"\bكل\b.*\bاحاديث\b",
         r"\bاجمع\b",
+        r"\bاذكر\b.*\bحديث\b.*\b(?:عن|في|حول|بخصوص)\b",
         r"\bاذكر\b.*\bاحاديث\b",
+        r"\bهات\b.*\bحديث\b.*\b(?:عن|في|حول|بخصوص)\b",
         r"\bهات\b.*\bاحاديث\b",
+        r"\bاعطني\b.*\bحديث\b.*\b(?:عن|في|حول|بخصوص)\b",
         r"\blist\b",
         r"\bcollection\b",
         r"\ball narrations\b",
@@ -75,9 +78,13 @@ _SPECIFIC_HADITH_MARKERS = [
         r"من\s+رواه",
         r"في\s+اي\s+كتاب",
         r"في\s+أي\s+كتاب",
+        r"هل\s+(?:قال|ذكر)\s+(?:النبي|رسول\s+الله)",
         r"«|\"",
     )
 ]
+
+# Refusal message returned when no context chunks are available.
+_NO_CONTEXT_REPLY = "لا يوجد معلومات كافية للإجابة على هذا السؤال من المصادر المتاحة."
 
 
 def _normalize(text: str) -> str:
@@ -120,7 +127,7 @@ def classify_answer_intent(
     if any(pattern.search(normalized) for pattern in _EXPLANATORY_PATTERNS):
         return AnswerIntent.EXPLANATORY
 
-    if query_type == "explain_hadith":
+    if query_type in {"explain_hadith", "topic", "general"}:
         if _looks_like_specific_hadith_request(normalized):
             return AnswerIntent.LOOKUP
         return AnswerIntent.EXPLANATORY
@@ -129,6 +136,25 @@ def classify_answer_intent(
         return AnswerIntent.LOOKUP
 
     return AnswerIntent.EXPLANATORY
+
+
+def check_context(chunks: list) -> str | None:
+    """
+    Call this in generate.py BEFORE sending anything to the LLM.
+
+    Returns a ready-made refusal string when there are no retrieved chunks,
+    so the LLM is never invoked and cannot hallucinate.
+    Returns None when chunks are present and generation should proceed normally.
+
+    Usage in generate.py:
+        refusal = check_context(retrieved_chunks)
+        if refusal:
+            return refusal
+        # ... proceed to call LLM
+    """
+    if not chunks:
+        return _NO_CONTEXT_REPLY
+    return None
 
 
 def grade_priority(grade: str) -> int:

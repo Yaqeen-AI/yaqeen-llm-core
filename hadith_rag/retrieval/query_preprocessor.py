@@ -505,6 +505,18 @@ _HADITH_LOOKUP_PATTERNS = [
     re.compile(r"(من\s+غشنا|لا\s+ضرر|إنما\s+الأعمال|الدين\s+النصيحة)"),  # Famous hadith starts
 ]
 
+_TOPICAL_HADITH_REQUEST_PATTERNS = [
+    re.compile(r"(?:حديث|احاديث|أحاديث|الأحاديث)\s+(?:عن|في|حول|بخصوص)\s+\S+"),
+    re.compile(r"(?:اذكر|أذكر|اعطني|أعطني|هات|اريد|أريد)\s+(?:لي\s+)?(?:حديث|احاديث|أحاديث)\s+(?:عن|في|حول|بخصوص)\s+\S+"),
+]
+
+_SPARSE_QUERY_STOPWORDS = {
+    "اذكر", "أذكر", "اعطني", "أعطني", "هات", "اريد", "أريد", "حديث",
+    "احاديث", "أحاديث", "الحديث", "عن", "في", "حول", "بخصوص", "ما",
+    "من", "الى", "إلى", "على", "هذا", "هذه", "الذي", "التي", "يجب",
+    "واجب", "ينبغي", "يلزم", "لنا", "لي", "به", "فيه",
+}
+
 # Topic expansion keywords
 _TOPIC_EXPANSIONS = {
     "صلاة": "صلاة فرض نافلة ركعة سجود قيام فضل الصلاة",
@@ -526,6 +538,10 @@ _TOPIC_EXPANSIONS = {
     "تواضع": "تواضع كبر تكبر خشوع",
     "أمانة": "أمانة خيانة وفاء عهد",
     "ظلم": "ظلم عدل قسط ظالم مظلوم",
+    "تعليم": "تعليم تعلم علموا",
+    "تعليمه": "تعليم تعلم علموا",
+    "أولاد": "أولاد أبناء صبيان",
+    "اولاد": "اولاد ابناء صبيان",
 }
 
 
@@ -628,6 +644,13 @@ def classify_query(text: str, metadata_fields: list[str]) -> QueryType:
     if metadata_fields:
         return QueryType.METADATA
 
+    # Topical requests like "اذكر حديث عن الصبر" are not requests to explain
+    # a specific hadith text. Route them as topic searches so generation does
+    # not fall into the "exact hadith not found" branch.
+    for pattern in _TOPICAL_HADITH_REQUEST_PATTERNS:
+        if pattern.search(text):
+            return QueryType.TOPIC
+
     # Explain/clarify a specific hadith (before HADITH_LOOKUP)
     if is_explain_query(text):
         return QueryType.EXPLAIN_HADITH
@@ -650,6 +673,74 @@ def classify_query(text: str, metadata_fields: list[str]) -> QueryType:
             return QueryType.TOPIC
     
     return QueryType.GENERAL
+
+
+def _strip_clitic_prefix(token: str) -> str:
+    """Remove common Arabic one-word prefixes used before nouns and verbs."""
+    for prefix in ("وال", "بال", "كال", "فال", "ولل", "فلل", "لل", "ال"):
+        if len(token) - len(prefix) >= 3 and token.startswith(prefix):
+            return token[len(prefix):]
+    for prefix in ("و", "ف", "ب", "ك", "ل"):
+        if len(token) - len(prefix) >= 3 and token.startswith(prefix):
+            return token[len(prefix):]
+    return token
+
+
+def _strip_pronoun_suffix(token: str) -> str:
+    """Return a light stem by removing common Arabic attached pronouns."""
+    for suffix in ("كما", "هما", "كم", "كن", "هم", "هن", "نا", "ها", "ه", "ك", "ي"):
+        if len(token) - len(suffix) >= 3 and token.endswith(suffix):
+            return token[: -len(suffix)]
+    return token
+
+
+def _generic_sparse_variants(token: str) -> list[str]:
+    """
+    Generate morphology-oriented variants without adding hadith-specific phrases.
+
+    This improves sparse retrieval when the user's wording uses abstract forms
+    (تعليم/يجب) while hadith matn often uses imperative or attached-pronoun
+    forms (علموا/مروا/أولادكم).
+    """
+    token = normalize_alef(token)
+    base = _strip_pronoun_suffix(_strip_clitic_prefix(token))
+    variants = [base] if base and base != token else []
+
+    if any(root in base for root in ("علم", "تعلم", "تعليم")):
+        variants.extend(["علم", "تعلم", "تعليم", "علموا"])
+
+    if base in {"يجب", "واجب", "ينبغي", "يلزم"}:
+        variants.extend(["امر", "امروا", "مروا", "اوصى", "وصية"])
+
+    if base in {"ولد", "اولاد", "ابن", "ابناء", "بنين", "صبي", "صبيان", "طفل", "اطفال"}:
+        variants.extend([
+            "ولد", "اولاد", "اولادكم", "اولادهم",
+            "ابن", "ابناء", "ابناءكم", "صبي", "صبيان",
+        ])
+
+    result = []
+    for variant in variants:
+        if variant and variant not in result:
+            result.append(variant)
+    return result
+
+
+def build_sparse_query_text(text: str) -> str:
+    """Build a cleaner sparse query with generic Arabic morphology variants."""
+    normalized = normalize_alef(normalize_query(text))
+    raw_tokens = re.findall(r"[\u0600-\u06FF]+", normalized)
+
+    terms: list[str] = []
+    for token in raw_tokens:
+        if len(token) < 2:
+            continue
+        if token not in _SPARSE_QUERY_STOPWORDS and token not in terms:
+            terms.append(token)
+        for variant in _generic_sparse_variants(token):
+            if variant not in terms and variant not in _SPARSE_QUERY_STOPWORDS:
+                terms.append(variant)
+
+    return " ".join(terms).strip() or normalized
 
 
 def expand_short_query(text: str) -> str:
@@ -907,27 +998,30 @@ def preprocess_query(query: str) -> ProcessedQuery:
         query_type=query_type.value,
     )
 
+    generic_sparse_query = build_sparse_query_text(retrieval_text)
+    expanded_sparse_query = build_sparse_query_text(expansion.sparse_query)
+
     # Determine final dense/sparse queries based on query type
     if query_type == QueryType.METADATA:
         # Metadata: use extracted hadith text directly (no expansion noise)
         dense_query = retrieval_text
-        sparse_query = retrieval_text
+        sparse_query = generic_sparse_query
         multi_queries = [retrieval_text]
     elif query_type == QueryType.EXPLAIN_HADITH:
         # Explain: use stripped hadith text for retrieval (not the instruction verb)
         dense_query = retrieval_text
-        sparse_query = expansion.sparse_query  # expander got retrieval_text, so it's clean
+        sparse_query = f"{generic_sparse_query} {expanded_sparse_query}".strip()
         multi_queries = [retrieval_text] + expansion.reformulations[:2]
     elif query_type == QueryType.NARRATOR:
         # Narrator: keep full original for dense; use expanded for sparse
         dense_query = normalized
-        sparse_query = expansion.sparse_query
+        sparse_query = f"{generic_sparse_query} {expanded_sparse_query}".strip()
         multi_queries = [normalized] + expansion.reformulations[:2]
     else:
         # General / Topic / Ruling / HADITH_LOOKUP: use full expansion
         dense_query = expansion.dense_query
-        sparse_query = expansion.sparse_query
-        multi_queries = expansion.multi_queries
+        sparse_query = f"{generic_sparse_query} {expanded_sparse_query}".strip()
+        multi_queries = expansion.multi_queries + [generic_sparse_query]
 
     # Apply alef normalization for sparse query (better recall)
     sparse_query_alef = normalize_alef(sparse_query)
