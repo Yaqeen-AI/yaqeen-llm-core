@@ -1,9 +1,12 @@
+import os
 from pydantic import BaseModel, Field
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.output_parsers import JsonOutputParser, StrOutputParser
 from state import AgentState
-from models.llm_loader import llm
-from supervisor import robust_json_extract # Or duplicate the helper here
+from models.llm_loader import get_llm
+from supervisor import robust_json_extract  # Or duplicate the helper here
+
+_DIR = os.path.dirname(os.path.abspath(__file__))
 
 class QueryDecomposition(BaseModel):
     is_complex: bool = Field(description="True if the question asks for multiple distinct things. False if it is a single question.")
@@ -12,11 +15,11 @@ class QueryDecomposition(BaseModel):
 def manager_node(state: AgentState):
     query = state["question"]
     
-    with open("prompts/manager_prompt.txt", "r") as f:
+    with open(os.path.join(_DIR, "prompts", "manager_prompt.txt"), "r") as f:
         manager_prompt = f.read()
 
     prompt = ChatPromptTemplate.from_template(manager_prompt)
-    chain = prompt | llm | StrOutputParser()
+    chain = prompt | get_llm() | StrOutputParser()
     raw = chain.invoke({"question": query})
 
     result = robust_json_extract(raw, {

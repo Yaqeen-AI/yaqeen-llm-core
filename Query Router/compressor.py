@@ -1,12 +1,13 @@
 from langchain_core.documents import Document
 from state import AgentState
-from models.llm_loader import tokenizer
+from models.llm_loader import get_tokenizer
 
 def compression_node(state: AgentState):
     docs = state.get("retrieved_context", [])
     if not docs:
         return {"retrieved_context": []}
 
+    tokenizer = get_tokenizer()
     raw_text = "\n\n".join([f"Source [{doc.metadata.get('source', 'Unknown')}]: {doc.page_content}" for doc in docs])
     tokens = tokenizer.encode(raw_text)
     

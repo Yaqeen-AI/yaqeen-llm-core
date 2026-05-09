@@ -9,7 +9,8 @@ def inspector_node(state: AgentState):
         return {"retrieved_context": []}
 
     sentence_pairs = [[query, doc.page_content] for doc in docs]
-    scores = reranker.predict(sentence_pairs)
+    # Process all pairs in parallel batches on the GPU
+    scores = reranker.predict(sentence_pairs, batch_size=32)
     scored_docs = list(zip(docs, scores))
 
     threshold = 0.0

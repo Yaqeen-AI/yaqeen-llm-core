@@ -11,3 +11,4 @@ faiss-cpu
 pydantic
 huggingface-hub
 python-dotenv
+bitsandbytes>=0.43.0
