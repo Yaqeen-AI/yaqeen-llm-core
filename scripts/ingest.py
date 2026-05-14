@@ -11,6 +11,7 @@ Steps:
 """
 
 import json
+import os
 import pathlib
 import pickle
 import sys
@@ -25,23 +26,28 @@ if _PROJECT_ROOT not in sys.path:
 import requests
 from tqdm import tqdm
 
+from llama_index.core.schema import Document
 from qdrant_client import QdrantClient
 from qdrant_client.models import (
-    Distance, PointStruct, VectorParams,
+    Distance, PayloadSchemaType, PointStruct, VectorParams,
 )
 
 from core.config import (
     COLLECTION_NAME, DATA_DIR, EMBED_BATCH_SIZE, EMBED_DIM,
-    JINA_API_KEY, JINA_EMBED_MODEL, QDRANT_PATH,
+    JINA_API_KEY, QDRANT_PATH,
     BM25_PATH, BM25_K1, BM25_B, BM25_DENSE_DIM, BM25_USE_GPU, UPSERT_BATCH_SIZE,
 )
 from core.bm25 import BM25Okapi
+from core.embeddings import JinaEmbedding
+
+_embed_model = JinaEmbedding()
 
 EMBED_CHECKPOINT = "embed_checkpoint.pkl"   # resume file for embeddings
 BATCH_DELAY      = 10.0                      # seconds between Jina API calls (free tier ~6 RPM)
 MAX_RETRIES      = 6                         # retries on 429 / 5xx
 RETRY_BASE       = 5.0                       # exponential backoff base (seconds)
-from core.arabic_utils import detect_mazhabs, normalize_corpus
+from core.arabic_utils import detect_mazhabs, detect_fiqh_topic, normalize_corpus
+from core.schema import QdrantPayload
 
 
 # ---------------------------------------------------------------------------
@@ -60,6 +66,18 @@ def load_records() -> list[dict]:
                 if line:
                     records.append(json.loads(line))
     return records
+
+
+def records_to_documents(records: list[dict]) -> list[Document]:
+    """Wrap raw JSONL records as LlamaIndex Document objects."""
+    return [
+        Document(
+            text=rec["chunk_text"],
+            metadata={k: v for k, v in rec.items() if k != "chunk_text"},
+            id_=str(idx),
+        )
+        for idx, rec in enumerate(records)
+    ]
 
 
 # ---------------------------------------------------------------------------
@@ -82,8 +100,10 @@ def build_bm25_corpus(texts: list[str]) -> BM25Okapi:
         dense_dim=BM25_DENSE_DIM,
         use_gpu=BM25_USE_GPU,
     )
-    with open(BM25_PATH, "wb") as f:
+    tmp_path = BM25_PATH.with_suffix(".tmp")
+    with open(tmp_path, "wb") as f:
         pickle.dump(bm25, f)
+    os.replace(tmp_path, BM25_PATH)
     avg_tokens = sum(len(t) for t in tokenized) // len(tokenized) if tokenized else 0
     print(f"BM25 corpus built — {bm25.corpus_size} documents, ~{avg_tokens} avg tokens/doc")
     return bm25
@@ -96,37 +116,28 @@ def build_bm25_corpus(texts: list[str]) -> BM25Okapi:
 MAX_CHARS = 6000  # Jina v3 max ~8192 tokens; Arabic ~4 chars/token → 6000 chars is safe
 
 
-def _embed_batch_with_retry(batch: list[str], headers: dict) -> list[list[float]]:
-    """Embed one batch with exponential backoff on 429/5xx and truncation on 400."""
-    # Truncate any oversized texts upfront
+def _embed_batch_with_retry(batch: list[str]) -> list[list[float]]:
+    """Embed one batch via JinaEmbedding with exponential backoff on 429/5xx."""
     safe_batch = [t[:MAX_CHARS] if len(t) > MAX_CHARS else t for t in batch]
 
     for attempt in range(MAX_RETRIES):
-        resp = requests.post(
-            "https://api.jina.ai/v1/embeddings",
-            headers=headers,
-            json={"model": JINA_EMBED_MODEL, "input": safe_batch,
-                  "dimensions": EMBED_DIM, "task": "retrieval.passage"},
-        )
-        if resp.status_code == 200:
-            data = sorted(resp.json()["data"], key=lambda x: x["index"])
-            return [item["embedding"] for item in data]
-        if resp.status_code in (401, 403):
-            body = resp.text.strip()
-            hint = "JINA_API_KEY is missing or invalid. Regenerate the key in your Jina dashboard and update .env."
-            if body:
-                hint = f"{hint}\nJina response: {body}"
-            sys.exit(f"Jina authentication failed ({resp.status_code}) for {JINA_EMBED_MODEL} at https://api.jina.ai/v1/embeddings. {hint}")
-        if resp.status_code in (429, 500, 502, 503, 504):
-            wait = RETRY_BASE * (2 ** attempt)
-            print(f"\n  [{resp.status_code}] rate limited — waiting {wait:.0f}s (attempt {attempt+1}/{MAX_RETRIES})")
-            time.sleep(wait)
-        elif resp.status_code == 400:
-            # Further truncate and retry once
-            safe_batch = [t[:2000] for t in safe_batch]
-            print(f"\n  [400] bad request — truncating to 2000 chars and retrying")
-        else:
-            resp.raise_for_status()
+        try:
+            return _embed_model._call_jina(safe_batch, task="retrieval.passage")
+        except requests.HTTPError as exc:
+            status = exc.response.status_code if exc.response is not None else 0
+            if status in (401, 403):
+                sys.exit(f"Jina authentication failed ({status}). Check JINA_API_KEY in .env.")
+            if status in (429, 500, 502, 503, 504):
+                wait = RETRY_BASE * (2 ** attempt)
+                print(f"\n  [{status}] rate limited — waiting {wait:.0f}s (attempt {attempt+1}/{MAX_RETRIES})")
+                time.sleep(wait)
+            elif status == 400:
+                safe_batch = [t[:2000] for t in safe_batch]
+                print(f"\n  [400] bad request — truncating to 2000 chars and retrying")
+            else:
+                raise
+        except Exception:
+            raise
     sys.exit("Max retries exceeded on Jina API.")
 
 
@@ -151,14 +162,13 @@ def jina_embed(texts: list[str]) -> list[list[float]]:
         all_vecs = []
         start_batch = 0
 
-    headers = {"Authorization": f"Bearer {JINA_API_KEY}", "Content-Type": "application/json"}
     batches = range(0, len(texts), EMBED_BATCH_SIZE)
 
     for i in tqdm(batches, desc="Jina v3 embedding", initial=start_batch, total=len(batches)):
         if i < start_batch * EMBED_BATCH_SIZE:
             continue
         batch = texts[i : i + EMBED_BATCH_SIZE]
-        vecs = _embed_batch_with_retry(batch, headers)
+        vecs = _embed_batch_with_retry(batch)
         all_vecs.extend(vecs)
         time.sleep(BATCH_DELAY)
 
@@ -189,7 +199,13 @@ def setup_collection(client: QdrantClient) -> None:
             "bm25_dense": VectorParams(size=BM25_DENSE_DIM, distance=Distance.COSINE),
         },
     )
-    print(f"Collection '{COLLECTION_NAME}' created.")
+    for field in ("mazhabs", "volume_id", "fiqh_topic"):
+        client.create_payload_index(
+            collection_name=COLLECTION_NAME,
+            field_name=field,
+            field_schema=PayloadSchemaType.KEYWORD,
+        )
+    print(f"Collection '{COLLECTION_NAME}' created with payload indexes on mazhabs + volume_id + fiqh_topic.")
 
 
 def upsert(client: QdrantClient, records: list[dict], dense_vecs: list, bm25) -> None:
@@ -202,14 +218,15 @@ def upsert(client: QdrantClient, records: list[dict], dense_vecs: list, bm25) ->
                     "dense": dense_vecs[i + j],
                     "bm25_dense": bm25.dense_vector_for_doc(bm25.corpus[i + j]),
                 },
-                payload={
-                    "chunk_text": rec["chunk_text"],
-                    "volume_id":  rec["volume_id"],
-                    "book_page":  rec["book_page"],
-                    "chunk_page": rec["chunk_page"],
-                    "source_url": rec.get("source_url", ""),
-                    "mazhabs":    detect_mazhabs(rec["chunk_text"]),
-                },
+                payload=QdrantPayload(
+                    chunk_text=rec["chunk_text"],
+                    volume_id=rec["volume_id"],
+                    book_page=rec["book_page"],
+                    chunk_page=rec["chunk_page"],
+                    source_url=rec.get("source_url", ""),
+                    mazhabs=detect_mazhabs(rec["chunk_text"]),
+                    fiqh_topic=(_t[0] if (_t := detect_fiqh_topic(rec["chunk_text"])) and len(_t) == 1 else ""),
+                ),
             )
             for j, rec in enumerate(batch)
         ]

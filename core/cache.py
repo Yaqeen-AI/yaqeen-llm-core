@@ -9,17 +9,17 @@ import hashlib
 import re
 import uuid
 
-import requests
 import redis as _redis
 from qdrant_client import QdrantClient
 from qdrant_client.models import Distance, PointStruct, VectorParams
 
 from core.arabic_utils import normalize
 from core.config import (
-    CACHE_COLLECTION, EMBED_DIM, JINA_API_KEY, JINA_EMBED_MODEL,
+    CACHE_COLLECTION, EMBED_DIM,
     REDIS_DB, REDIS_HOST, REDIS_MAX_MEMORY,
     REDIS_PORT, SEMANTIC_THRESHOLD,
 )
+from core.embeddings import get_embedding_model
 from core.qdrant_singleton import cache_client
 
 
@@ -27,15 +27,16 @@ class TwoTierCache:
     """
     Usage:
         cache = TwoTierCache()
-        answer = cache.get(query)          # None on miss
+        answer, vec = cache.get(query)     # answer is None on miss
         if answer is None:
             answer = ...generate...
-            cache.set(query, answer)
+            cache.set(query, answer, vec)  # pass vec to skip second embed call
     """
 
     def __init__(self) -> None:
         self._r: _redis.Redis | None = None
         self._q: QdrantClient | None = None
+        self._jina = get_embedding_model()
         self._init_redis()
         self._init_qdrant()
 
@@ -85,41 +86,29 @@ class TwoTierCache:
         return hashlib.sha256(text.encode()).hexdigest()
 
     def _embed(self, text: str) -> list[float] | None:
-        if not JINA_API_KEY:
-            return None
         try:
-            resp = requests.post(
-                "https://api.jina.ai/v1/embeddings",
-                headers={
-                    "Authorization": f"Bearer {JINA_API_KEY}",
-                    "Content-Type": "application/json",
-                },
-                json={
-                    "model": JINA_EMBED_MODEL,
-                    "input": [text],
-                    "dimensions": EMBED_DIM,
-                    "task": "retrieval.query",
-                },
-                timeout=10,
-            )
-            resp.raise_for_status()
-            return resp.json()["data"][0]["embedding"]
+            return self._jina.get_query_embedding(text)
         except Exception:
             return None
 
     # ── Public API ───────────────────────────────────────────────────────────
 
-    def get(self, query: str) -> str | None:
-        """Return cached answer (str) or None on miss."""
+    def get(self, query: str) -> tuple[str | None, list[float] | None]:
+        """Return (cached_answer, embedding_vec) or (None, vec) on miss.
+
+        The embedding vector is returned so callers can pass it to set()
+        without triggering a second Jina API call.
+        """
         normalized = self._normalize(query)
         key = self._hash(normalized)
+        vec: list[float] | None = None
 
         # Tier 1 — exact hash match (microseconds)
         if self._r:
             try:
                 hit = self._r.get(key)
                 if hit:
-                    return hit
+                    return hit, None
             except Exception:
                 pass
 
@@ -143,14 +132,17 @@ class TwoTierCache:
                                 self._r.set(key, answer)
                             except Exception:
                                 pass
-                        return answer
+                        return answer, None
                 except Exception:
                     pass
 
-        return None
+        return None, vec
 
-    def set(self, query: str, answer: str) -> None:
-        """Store answer in both tiers."""
+    def set(self, query: str, answer: str, precomputed_vec: list[float] | None = None) -> None:
+        """Store answer in both tiers.
+
+        Pass precomputed_vec (from cache.get()) to skip a second Jina embed call.
+        """
         normalized = self._normalize(query)
         key = self._hash(normalized)
 
@@ -163,7 +155,7 @@ class TwoTierCache:
 
         # Tier 2
         if self._q:
-            vec = self._embed(normalized)
+            vec = precomputed_vec if precomputed_vec is not None else self._embed(normalized)
             if vec:
                 try:
                     self._q.upsert(

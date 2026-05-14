@@ -7,10 +7,13 @@
 ![Qdrant](https://img.shields.io/badge/Qdrant-Vector_DB-DC244C?style=flat-square)
 ![Jina](https://img.shields.io/badge/Jina_AI-Embeddings_v3-000000?style=flat-square)
 ![Redis](https://img.shields.io/badge/Redis-Two--Tier_Cache-DC382D?style=flat-square&logo=redis&logoColor=white)
+![LlamaIndex](https://img.shields.io/badge/LlamaIndex-Retriever-7B2FBE?style=flat-square)
+![LangGraph](https://img.shields.io/badge/LangGraph-Orchestration-1C7C54?style=flat-square)
+![Gemini](https://img.shields.io/badge/Gemini_2.0_Flash-Google_API-4285F4?style=flat-square&logo=google&logoColor=white)
 ![Gradio](https://img.shields.io/badge/Gradio-UI-FF7C00?style=flat-square)
-![LM Studio](https://img.shields.io/badge/LM_Studio-Gemma_4-7C3AED?style=flat-square)
+![FastAPI](https://img.shields.io/badge/FastAPI-REST_API-009688?style=flat-square)
 
-*Ask any Islamic jurisprudence question in Arabic. Get a grounded, cited, madhab-attributed answer from 46 volumes of classical scholarship — powered entirely by local AI.*
+*Ask any Islamic jurisprudence question in Arabic. Get a grounded, cited, madhab-attributed answer from 46 volumes of classical scholarship.*
 
 </div>
 
@@ -24,9 +27,10 @@ Every answer is:
 - **Grounded** in specific passages from the encyclopedia
 - **Cited** with standardized academic references (`م.ف.ك — جX، صY`)
 - **Madhab-aware** — Hanafi, Maliki, Shafi'i, and Hanbali positions are detected and labeled per passage
+- **Topic-filtered** — queries are routed to the relevant Fiqh topic slice before search, reducing the effective corpus from 100k to ~10–25k chunks
 - **Citation-validated** — post-generation check flags any invented reference numbers
-- **Cached** — two-tier cache (Redis exact + Qdrant semantic) eliminates redundant LLM calls
-- **Generated locally** — no data leaves your machine
+- **Cached** — two-tier cache (Redis exact + Qdrant semantic) eliminates redundant API calls
+- **Query-router ready** — the LangGraph retrieval graph returns `list[NodeWithScore]` documents for downstream routing
 
 ---
 
@@ -39,56 +43,70 @@ Arabic Query
 ┌─────────────────────────────────────────────────┐
 │                Two-Tier Cache                   │
 │  Tier 1: Redis SHA-256 hash  →  O(1) exact hit  │
-│  Tier 2: Jina v3 cosine ≥ 0.80 → semantic hit   │  
+│  Tier 2: Jina v3 cosine ≥ 0.80 → semantic hit   │
 └────────────────────┬────────────────────────────┘
                      │ miss
                      ▼
 ┌─────────────────────────────────────────────────┐
-│             Arabic Normalization                │
-│  NFKC · alef · tashkeel · tatweel               │
-│  ya/waw hamza · Eastern numerals (٠–٩ → 0–9)    │
-└──────────────────┬──────────────────────────────┘
-                   │
-         ┌─────────┴──────────┐
-         ▼                    ▼
- ┌──────────────┐    ┌────────────────┐
- │  Jina v3     │    │   BM25 Okapi   │
- │  Dense       │    │   Feature-hash │
- │  1024-dim    │    │   2048-dim     │
- └──────┬───────┘    └──────┬─────────┘
-        │                   │
-        └─────────┬─────────┘
-                  ▼
-       ┌─────────────────────┐
-       │   Qdrant Prefetch   │
-       │   (50 per modality) │
-       └──────────┬──────────┘
-                  ▼
-       ┌─────────────────────┐
-       │  Reciprocal Rank    │
-       │  Fusion  (RRF)      │
-       └──────────┬──────────┘
-                  ▼
-       ┌─────────────────────┐
-       │  Jina Reranker v2   │
-       │  Multilingual       │
-       │  → Top 10 results   │
-       │  + Mazhab tags      │
-       └──────────┬──────────┘
-                  ▼
-       ┌─────────────────────┐
-       │   Gemma 4           │
-       │   (LM Studio)       │
-       │   Arabic answer     │
-       │   + inline [n] refs │
-       │   + citation check  │
-       └─────────────────────┘
-                  │
-                  ▼
-       ┌─────────────────────┐
-       │  Populate Cache     │
-       │  (Tier 1 + Tier 2)  │
-       └─────────────────────┘
+│         LangGraph: extract_filter_node          │
+│  detect_mazhabs()    →  mazhab pre-filter       │
+│  detect_fiqh_topic() →  topic pre-filter        │
+│  (narrows corpus: 100k → ~10–25k chunks)        │
+└────────────────────┬────────────────────────────┘
+                     │
+           ┌─────────┴──────────┐
+           ▼                    ▼
+   ┌──────────────┐    ┌────────────────┐
+   │  Jina v3     │    │   BM25 Okapi   │
+   │  Dense       │    │   Feature-hash │
+   │  1024-dim    │    │   2048-dim     │
+   └──────┬───────┘    └──────┬─────────┘
+          │ (parallel)        │
+          └─────────┬─────────┘
+                    ▼
+         ┌─────────────────────┐
+         │  Qdrant Prefetch    │
+         │  + Metadata Filter  │
+         │  (topic + mazhab)   │
+         │  (20 per modality)  │
+         └──────────┬──────────┘
+                    ▼
+         ┌─────────────────────┐
+         │  Reciprocal Rank    │
+         │  Fusion  (RRF)      │
+         └──────────┬──────────┘
+                    ▼
+         ┌─────────────────────┐
+         │  Jina Reranker v2   │
+         │  Multilingual       │
+         │  → Top 10 results   │
+         │  + Mazhab tags      │
+         │  + Topic tags       │
+         └──────────┬──────────┘
+                    ▼
+         ┌──────────────────────────┐
+         │  LangGraph StateGraph    │
+         │  FiqhRAGState            │
+         │  { query,                │
+         │    mazhab_filter,        │
+         │    topic_filter,         │
+         │    documents }           │
+         │  → list[NodeWithScore]   │  ◄─ consumed by query router
+         └──────────┬───────────────┘
+                    ▼
+         ┌─────────────────────┐
+         │  Gemini 2.0 Flash   │
+         │  (CustomLLM)        │
+         │  Arabic answer      │
+         │  + inline [n] refs  │
+         │  + citation check   │
+         └─────────────────────┘
+                    │
+                    ▼
+         ┌─────────────────────┐
+         │  Populate Cache     │
+         │  (Tier 1 + Tier 2)  │
+         └─────────────────────┘
 ```
 
 ---
@@ -97,16 +115,20 @@ Arabic Query
 
 | Component | Technology | Purpose |
 |---|---|---|
-| **Vector DB** | [Qdrant](https://qdrant.tech) (local) | Stores named dense vectors (`dense` + `bm25_dense`) |
-| **Dense Embeddings** | [Jina Embeddings v3](https://jina.ai) · 1024-dim | Semantic similarity |
+| **Vector DB** | [Qdrant](https://qdrant.tech) (local) | Stores named dense vectors (`dense` + `bm25_dense`) + metadata indexes |
+| **Dense Embeddings** | [Jina Embeddings v3](https://jina.ai) · 1024-dim · `BaseEmbedding` | Semantic similarity |
 | **Keyword Vectors** | Custom BM25 Okapi · feature-hashed · 2048-dim | Probabilistic keyword ranking as dense vector |
 | **Hybrid Fusion** | Reciprocal Rank Fusion via Qdrant | Merges both result lists |
-| **Reranker** | [Jina Reranker v2](https://jina.ai) multilingual | Cross-encoder reranking |
+| **Reranker** | [Jina Reranker v2](https://jina.ai) multilingual · `BaseNodePostprocessor` | Cross-encoder reranking |
+| **Retriever** | [LlamaIndex](https://llamaindex.ai) `BaseRetriever` | Standard `NodeWithScore` document interface |
+| **LLM** | [LlamaIndex](https://llamaindex.ai) `CustomLLM` wrapping Gemini | Settings-registered LLM for LlamaIndex compatibility |
+| **Orchestration** | [LangGraph](https://langchain-ai.github.io/langgraph/) `StateGraph` | Filter extraction + retrieval graph |
 | **Cache Tier 1** | [Redis](https://redis.io) · SHA-256 · LRU eviction | Exact-match, microsecond lookup |
 | **Cache Tier 2** | Qdrant · Jina v3 · cosine ≥ 0.80 | Semantic-match, paraphrase hits |
-| **Generation** | Gemma 4 via [LM Studio](https://lmstudio.ai) | Local Arabic answer synthesis |
+| **Generation** | Gemini 2.0 Flash via [Google AI](https://ai.google.dev) | Arabic answer synthesis via API |
+| **REST API** | [FastAPI](https://fastapi.tiangolo.com) | Retrieval-only endpoint for query router integration |
 | **Web UI** | [Gradio](https://gradio.app) | Arabic RTL chat interface |
-| **Arabic NLP** | Custom normalization + mazhab detection | NFKC, diacritics, scholar patterns |
+| **Arabic NLP** | Custom normalization + mazhab + topic detection | NFKC, diacritics, scholar patterns, Fiqh topic routing |
 
 ---
 
@@ -116,18 +138,24 @@ Arabic Query
 FiqhRAG/
 │
 ├── core/                         Library — imported by all entry points
-│   ├── arabic_utils.py           Normalization + mazhab detection + citation format
+│   ├── arabic_utils.py           Normalization · mazhab detection · Fiqh topic detection · citation format
 │   ├── bm25.py                   Custom BM25 Okapi + feature-hashed dense vectors (GPU optional)
 │   ├── cache.py                  Two-tier cache (Redis exact + Qdrant semantic)
 │   ├── config.py                 All settings — edit this file
-│   ├── generator.py              Gemma 4 via LM Studio + citation validator
+│   ├── embeddings.py             JinaEmbedding (LlamaIndex BaseEmbedding) — shared across all callers
+│   ├── generator.py              GeminiLLM (LlamaIndex CustomLLM) + Arabic answer generation + citation validator
+│   ├── graph.py                  LangGraph StateGraph — filter extraction + retrieval pipeline
+│   ├── http.py                   Shared requests.Session — TCP connection pooling for Jina API calls
+│   ├── llamaindex_retriever.py   LlamaIndex BaseRetriever adapter + Result↔NodeWithScore converters
 │   ├── qdrant_singleton.py       Shared Qdrant client (prevents file-lock conflicts)
-│   └── retriever.py              Hybrid search + Jina reranker + mazhab tagging
+│   ├── reranker.py               JinaReranker (LlamaIndex BaseNodePostprocessor)
+│   ├── retriever.py              Hybrid search (BM25 + Qdrant RRF) + mazhab/topic filter + fallback logic
+│   └── schema.py                 TypedDicts: QdrantPayload · NodeMetadata (single source of truth for field names)
 │
 ├── scripts/                      One-time / admin tools
-│   ├── ingest.py                 Build the vector index (run once, ~90 min)
-│   ├── enrich_payloads.py        Add mazhab tags to existing index (run once, <1 min)
-│   └── verify_integration.py    Diagnostic — verify all components are working
+│   ├── ingest.py                 Build the vector index (run once, ~90 min on free Jina tier)
+│   ├── enrich_payloads.py        Backfill mazhab + fiqh_topic tags on existing index (run once, <1 min)
+│   └── smoke_test.py             RAG evaluation — hit rate, rerank scores, latency across 20 questions
 │
 ├── data/                         Generated artifacts  (gitignored)
 │   ├── bm25_corpus.pkl           Fitted BM25 model (16,971 documents)
@@ -137,9 +165,9 @@ FiqhRAG/
 ├── qdrant_storage/               Qdrant RAG index        (gitignored, auto-created)
 ├── qdrant_cache/                 Qdrant semantic cache   (gitignored, auto-created)
 │
-├── app.py                        ▶  Web UI   — python app.py  or  start.bat
-├── main.py                       ▶  CLI      — python main.py
-├── start.bat                     Windows launcher (kills stale locks before starting)
+├── app.py                        ▶  Web UI      — python app.py          (port 7860)
+├── main.py                       ▶  CLI          — python main.py
+├── api.py                        ▶  REST API     — uvicorn api:app        (port 8000)
 │
 ├── .env                          API keys  (not committed)
 └── requirements.txt              Python dependencies
@@ -154,8 +182,8 @@ FiqhRAG/
 | Requirement | Details |
 |---|---|
 | **Python** | 3.11 or higher (3.14 fully supported and tested) |
-| **[LM Studio](https://lmstudio.ai)** | Load **Gemma 4**, start local server on port `1234` |
 | **[Jina AI API key](https://jina.ai)** | Free tier — used for embeddings + reranker |
+| **[Google AI API key](https://ai.google.dev)** | Used for Gemini 2.0 Flash generation |
 | **[Redis](https://redis.io/download)** | Optional — Tier 1 cache degrades gracefully if absent |
 | **NVIDIA GPU + CUDA** | Optional — enables GPU-accelerated BM25 encoding (see GPU section below) |
 
@@ -168,44 +196,37 @@ pip install -r requirements.txt
 ### 2 — Configure environment
 
 ```bash
-# Copy the example and add your Jina API key
 cp .env.example .env
 ```
 
 `.env` contents:
 ```
-JINA_API_KEY=your_key_here
+JINA_API_KEY=your_jina_key_here
+GOOGLE_API_KEY=your_google_key_here
+GEMINI_MODEL=gemini-2.0-flash
 ```
 
-### 3 — Set your LM Studio model name
-
-Open `core/config.py` and match the model name shown in LM Studio → Model tab:
-
-```python
-LM_STUDIO_MODEL = "gemma-4-26b-a4b"   # ← change to match yours
-```
-
-### 4 — Build the index (run once)
+### 3 — Build the index (run once)
 
 Loads all 46 volumes, builds BM25 corpus, embeds with Jina v3, and indexes into Qdrant.
 
 ```bash
-python scripts/ingest.py
+python -m scripts.ingest
 ```
 
-> **Note:** Jina free tier is rate-limited to ~6 requests/min. With 16,971 chunks at batch size 32, this takes approximately 90 minutes. The pipeline is **resumable** — if interrupted, re-run the same command and it picks up from the checkpoint automatically. A corrupted checkpoint is detected and discarded, restarting cleanly.
+> **Note:** Jina free tier is rate-limited to ~6 requests/min. With 16,971 chunks at batch size 32, this takes approximately 90 minutes. The pipeline is **resumable** — if interrupted, re-run the same command and it picks up from the checkpoint automatically.
 
-### 5 — Enrich existing index with mazhab tags (run once)
+### 4 — Enrich existing index (run once)
 
-Backfills mazhab detection into every Qdrant point. No re-embedding — pure local operation, completes in under a minute.
+Backfills `mazhabs` and `fiqh_topic` metadata on every Qdrant point. No re-embedding — pure local operation, completes in under a minute. **Required** for topic-based corpus filtering to take effect.
 
 ```bash
-python scripts/enrich_payloads.py
+python -m scripts.enrich_payloads
 ```
 
 Sample output:
 ```
-Enriching 16,971 points...
+Enriching 16,971 points in 'fiqh_rag' with mazhab + fiqh_topic tags...
 Done — 16,971 points updated.
 
 Mazhab mention counts:
@@ -216,28 +237,7 @@ Mazhab mention counts:
   جمهور       1,120   (6.6%)
 ```
 
-### 6 — Verify integration
-
-Run the diagnostic script to confirm all components are wired correctly:
-
-```bash
-python scripts/verify_integration.py
-```
-
-Expected output:
-```
-[OK] Config loaded: BM25_USE_GPU=True, BM25_DENSE_DIM=2048
-[OK] BM25Okapi imported
-[OK] FiqhRetriever initialized
-     - BM25 corpus size: 16971 documents
-[OK] Dense BM25 query encoding works
-[OK] Qdrant collection 'fiqh' exists  (16971 points)
-[OK] Gradio app (app.py) syntax valid
-[OK] Torch available: CUDA=True
-     - Device: NVIDIA GeForce RTX 3080 Ti
-```
-
-### 7 — Run
+### 5 — Run
 
 **Web UI** (recommended):
 ```bash
@@ -248,6 +248,87 @@ python app.py
 **CLI:**
 ```bash
 python main.py
+```
+
+**REST API:**
+```bash
+uvicorn api:app --host 0.0.0.0 --port 8000
+```
+
+---
+
+## Fiqh Topic Filtering
+
+Each chunk is tagged at ingestion time with its dominant Fiqh topic using keyword pattern matching on the Arabic text. At query time, the same detector runs on the user's question and applies a Qdrant pre-filter before the vector search — so Qdrant scans only the relevant topic slice.
+
+**Topic categories and typical corpus share:**
+
+| Topic | Arabic | ~Corpus share |
+|---|---|---|
+| Sales & contracts | بيوع | ~13% |
+| Partnerships & debts | الشركات والديون | ~12% |
+| Prayer | صلاة | ~21% |
+| Pilgrimage | حج | ~17% |
+| Purification | طهارة | ~9% |
+| Fasting | صيام | ~4% |
+| Zakat | زكاة | ~4% |
+| Marriage | نكاح | ~3% |
+| Divorce | طلاق | ~3% |
+| Inheritance | ميراث | ~2% |
+| Crimes & penalties | جنايات | ~5% |
+
+For a 100k-chunk corpus, a prayer query searches ~21k chunks instead of 100k — a 5× reduction with zero accuracy loss.
+
+**Tie handling:** when two topics score equally (e.g. "السواك في الصلاة"), both are passed to Qdrant as a union filter — still a meaningful corpus reduction. If the collection has no `fiqh_topic` field yet (before `enrich_payloads.py` is run), the retriever falls back to full-corpus search automatically and logs a warning.
+
+**Threshold:** configured via `_MIN_TOPIC_SCORE` in `core/arabic_utils.py` (default: 1). Increase to 2 to require stronger signal before filtering is applied.
+
+---
+
+## Query Router Integration
+
+The LangGraph graph is designed to be embedded in a larger query router pipeline. The retrieval node returns standard LlamaIndex `NodeWithScore` documents — not a generated answer — so the router decides what to do next.
+
+```python
+from core.graph import fiqh_graph
+from core.llamaindex_retriever import nodes_to_results
+
+# Invoke the retrieval graph
+result = fiqh_graph.invoke({"query": "ما حكم الوضوء بالماء المستعمل؟"})
+
+# List of NodeWithScore — each node carries full metadata
+docs = result["documents"]   # list[NodeWithScore]
+
+# Metadata available on each doc:
+# doc.node.text          — Arabic passage text
+# doc.score              — rerank score (primary relevance signal)
+# doc.node.metadata keys:
+#   volume_id            — e.g. "Volume 40"
+#   book_page            — e.g. "Page 359"
+#   chunk_page           — e.g. "1 of 45"
+#   source_url           — original URL
+#   mazhabs              — detected madhabs e.g. ["حنفي", "شافعي"]
+#   fiqh_topic           — dominant topic e.g. "طهارة"
+#   qdrant_score         — pre-rerank fusion score
+#   rerank_score         — post-rerank score (same as doc.score)
+#   short_ref            — formatted citation string "م.ف.ك — ج40، ص359"
+#   rank                 — 0-based rank after reranking
+```
+
+To pass documents to the generator:
+```python
+from core.llamaindex_retriever import nodes_to_results
+from core.generator import generate_answer
+
+results = nodes_to_results(docs)
+answer = generate_answer(query, results)
+```
+
+**REST API** (retrieval only, no generation):
+```bash
+curl -X POST http://localhost:8000/retrieve \
+  -H "Content-Type: application/json" \
+  -d '{"query": "ما حكم الوضوء بالماء المستعمل؟"}'
 ```
 
 ---
@@ -262,17 +343,12 @@ BM25 dense vector encoding supports GPU acceleration via PyTorch. The system aut
 
 ### Installing torch on Python 3.14
 
-PyTorch stable releases do not yet publish wheels for Python 3.14. Use the nightly build instead. The CUDA 12.6 wheel is backward compatible with CUDA 13.x drivers.
+PyTorch stable releases do not yet publish wheels for Python 3.14. Use the nightly build instead:
 
 ```bash
-# First remove any existing (incompatible) torch
 pip uninstall torch -y
-
-# Install nightly for Python 3.14 + CUDA 12.6 (works on CUDA 13.x drivers)
 pip install --pre torch --index-url https://download.pytorch.org/whl/nightly/cu126
 ```
-
-Check your CUDA version with `nvidia-smi` and substitute the correct tag if needed (`cu121`, `cu124`, `cu126`).
 
 ---
 
@@ -285,10 +361,10 @@ All settings live in `core/config.py`:
 | `JINA_EMBED_MODEL` | `jina-embeddings-v3` | Embedding model |
 | `JINA_RERANK_MODEL` | `jina-reranker-v2-base-multilingual` | Reranker model |
 | `EMBED_DIM` | `1024` | Embedding dimensions |
-| `LM_STUDIO_MODEL` | `gemma-4-26b-a4b` | Model loaded in LM Studio |
-| `LM_STUDIO_BASE_URL` | `http://localhost:1234/v1` | LM Studio server |
-| `TOP_K_FETCH` | `50` | Candidates before reranking |
-| `TOP_K_FINAL` | `10` | Results after reranking |
+| `GOOGLE_API_KEY` | env var | Google AI API key for Gemini |
+| `GEMINI_MODEL` | `gemini-2.0-flash` | Gemini model name (override via env var) |
+| `TOP_K_FETCH` | `20` | Candidates fetched before reranking |
+| `TOP_K_FINAL` | `10` | Results returned after reranking |
 | `BM25_K1` | `1.5` | BM25 term frequency saturation |
 | `BM25_B` | `0.75` | BM25 length normalization |
 | `BM25_DENSE_DIM` | `2048` | Feature-hash vector size |
@@ -373,54 +449,15 @@ Each JSONL record:
 After `enrich_payloads.py`, each Qdrant point additionally carries:
 ```json
 {
-  "mazhabs": ["حنفي", "شافعي"]
+  "mazhabs":    ["حنفي", "شافعي"],
+  "fiqh_topic": "طهارة"
 }
 ```
 
----
-
-## Performance & Latency
-
-### Baseline (smoke test — 10 questions)
-
-| Stage | Range | Notes |
-|---|---|---|
-| **Retrieval** | 3–14 s | Jina embed API + Qdrant local + Jina rerank API |
-| **Generation** | 53–107 s | Gemma 4 26B on CPU via LM Studio |
-| **Cache hit (Tier 1)** | < 1 ms | Redis exact match |
-| **Cache hit (Tier 2)** | ~200 ms | Qdrant semantic search + 1 Jina embed call |
-
-### Optimizations applied
-
-| # | What | Where | Impact |
-|---|---|---|---|
-| **Connection pooling** | `requests.Session()` reuses TCP connections to Jina API | `core/retriever.py` | −0.5–1 s/query |
-| **TOP_K_FETCH 50→30** | Fewer candidates sent to reranker (latency ∝ n) | `core/config.py` | −1–3 s/query |
-| **MAX_OUTPUT_TOKENS 2048→1024** | Fiqh answers rarely exceed 1k tokens; CPU inference time ∝ tokens | `core/config.py` | −15–30 s/query |
-| **Streaming generation** | Tokens yielded to UI as they arrive; user reads while model generates | `core/generator.py`, `app.py` | First token in ~2 s (was 53–107 s wait) |
-| **Gradio queue tuned** | `max_size=20` prevents silent drops under load | `app.py` | Multi-user fairness |
-| **Request timeouts** | 15 s embed / 20 s rerank; prevents silent hangs | `core/retriever.py` | Reliability |
-
-### Remaining roadmap (not yet implemented)
-
-| Improvement | Expected gain | Effort |
-|---|---|---|
-| Async Jina calls (`aiohttp`) — overlap embed + rerank latency | −1–3 s | Medium |
-| Pass embedding from cache layer to retriever — avoid double-embed on miss | −3–7 s | Medium |
-| GPU inference in LM Studio (RTX 3080 Ti) | −40–80 s generation | Low (config only) |
-| Qdrant server mode — removes single-process file lock constraint | Enables multi-process deploys | Medium |
-| Batch embedding during ingestion already uses `EMBED_BATCH_SIZE=32` | — | Done |
-
-### How to get GPU generation
-
-The biggest single gain is offloading Gemma 4 to your RTX 3080 Ti in LM Studio:
-
-1. Open LM Studio → select your Gemma 4 model
-2. In **Load Settings**, set **GPU Layers** to the maximum the model allows
-3. Restart the server — generation drops from 53–107 s to ~5–15 s
+The full payload schema is defined in `core/schema.py` (`QdrantPayload` TypedDict).
 
 ---
 
 ## Inspiration
 
-Inspired by [AIFiqh](https://aifiqh.com) — a specialized Islamic jurisprudence AI platform. This project extends their RAG concept with Qdrant hybrid search, Jina v3 embeddings, custom BM25 Okapi with feature-hashed dense vectors, a two-tier response cache, madhab-aware context, and a fully local generation pipeline via LM Studio.
+Inspired by [AIFiqh](https://aifiqh.com) — a specialized Islamic jurisprudence AI platform. This project extends their RAG concept with Qdrant hybrid search, Jina v3 embeddings, custom BM25 Okapi with feature-hashed dense vectors, a two-tier response cache, madhab-aware context, Fiqh topic filtering, LlamaIndex retriever/LLM abstractions, LangGraph orchestration, and Gemini 2.0 Flash generation.

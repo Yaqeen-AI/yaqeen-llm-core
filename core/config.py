@@ -7,13 +7,12 @@ load_dotenv()
 # --- Jina AI (embeddings + reranker) ---
 JINA_API_KEY      = os.getenv("JINA_API_KEY", "")
 JINA_EMBED_MODEL  = "jina-embeddings-v3"
-JINA_RERANK_MODEL = "jina-reranker-v2-base-multilingual"
+JINA_RERANK_MODEL = "jina-reranker-v3"
 EMBED_DIM         = 1024
 
-# --- LM Studio (local Gemma 4) ---
-LM_STUDIO_BASE_URL = "http://localhost:1234/v1"
-LM_STUDIO_MODEL    = "gemma-4-26b-a4b"   # name shown in LM Studio → Model tab
-LM_STUDIO_API_KEY  = "lm-studio"        # LM Studio ignores this, but openai SDK requires it
+# --- Google Gemini API ---
+GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY", "")
+GEMINI_MODEL   = os.getenv("GEMINI_MODEL", "gemma-3-27b-it")
 
 # --- Qdrant (local file storage) ---
 QDRANT_PATH     = str(Path(__file__).parent.parent / "qdrant_storage")
@@ -27,7 +26,7 @@ BM25_PATH       = DATA_ARTIFACTS / "bm25_corpus.pkl"
 # --- Search tuning ---
 EMBED_BATCH_SIZE  = 32   # chunks per Jina API call during ingestion
 UPSERT_BATCH_SIZE = 256  # points per Qdrant upsert
-TOP_K_FETCH       = 30   # candidate pool before reranking  (was 50; reranker latency ∝ n)
+TOP_K_FETCH       = 20   # candidate pool before reranking  (was 30 → 20; reranker latency ∝ n)
 TOP_K_FINAL       = 10   # results returned after reranking
 
 # --- Generation ---
@@ -54,6 +53,12 @@ def _gpu_available() -> bool:
 
 BM25_USE_GPU = _gpu_available()
 
+EMBED_DEVICE       = "cuda" if BM25_USE_GPU else "cpu"
+LOCAL_EMBED_MODEL  = "jinaai/jina-embeddings-v3"
+LOCAL_RERANK_MODEL = "jinaai/jina-reranker-v2-base-multilingual"
+USE_LOCAL_EMBED    = os.getenv("USE_LOCAL_EMBED",  "1" if BM25_USE_GPU else "0") == "1"
+USE_LOCAL_RERANK   = os.getenv("USE_LOCAL_RERANK", "1" if BM25_USE_GPU else "0") == "1"
+
 # --- Two-Tier Cache ---
 REDIS_HOST        = os.getenv("REDIS_HOST", "localhost")
 REDIS_PORT        = int(os.getenv("REDIS_PORT", 6379))
@@ -63,3 +68,8 @@ REDIS_MAX_MEMORY  = os.getenv("REDIS_MAX_MEMORY", "256mb")
 QDRANT_CACHE_PATH  = str(Path(__file__).parent.parent / "qdrant_cache")
 CACHE_COLLECTION   = "fiqh_query_cache"
 SEMANTIC_THRESHOLD = 0.80
+
+# --- Reranker input truncation ---
+# Jina reranker only needs the first ~512 chars to judge relevance.
+# Full chunk texts (up to 6000 chars) are sent to the LLM unchanged.
+RERANK_TRUNCATE_CHARS = 512

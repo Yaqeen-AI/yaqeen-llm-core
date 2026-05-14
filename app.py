@@ -3,34 +3,25 @@ FiqhRAG — Arabic web UI (Gradio 6)
     python app.py
 """
 
-import gradio as gr
-from core.retriever import FiqhRetriever
-from core.generator import generate_answer_stream
-from core.cache import TwoTierCache
+import threading
 
-cache     = TwoTierCache()
-_retriever: FiqhRetriever | None = None
-_retriever_error: str | None = None
+import gradio as gr
+from llama_index.core import Settings
+
+from core.cache import TwoTierCache
+from core.embeddings import JinaEmbedding
+from core.generator import GeminiLLM, generate_answer_stream
+from core.graph import fiqh_graph
+from core.llamaindex_retriever import nodes_to_results
+
+Settings.embed_model = JinaEmbedding()
+Settings.llm = GeminiLLM()
+
+cache = TwoTierCache()
 
 
 def _msg(role: str, content: str) -> dict:
     return {"role": role, "content": content}
-
-
-def _get_retriever():
-    global _retriever, _retriever_error
-    if _retriever is not None:
-        return _retriever
-    if _retriever_error is not None:
-        return None
-
-    try:
-        _retriever = FiqhRetriever()
-    except SystemExit as e:
-        _retriever_error = str(e)
-    except Exception as e:
-        _retriever_error = str(e)
-    return _retriever
 
 
 def ask(query: str, history: list):
@@ -39,7 +30,7 @@ def ask(query: str, history: list):
         return
 
     # ── Cache check ───────────────────────────────────────────────────────
-    cached_answer = cache.get(query)
+    cached_answer, _vec = cache.get(query)  # _vec reused below to skip re-embed
     if cached_answer is not None:
         full_response = (
             f"{cached_answer}\n\n"
@@ -51,17 +42,12 @@ def ask(query: str, history: list):
 
     yield history + [_msg("user", query)], "", gr.update(visible=True)
 
-    # ── Retrieve ──────────────────────────────────────────────────────────
-    retriever = _get_retriever()
-    if retriever is None:
-        message = _retriever_error or "تعذّر تحميل المسترجِع."
-        yield history + [_msg("user", query), _msg("assistant", f"⚠️ **تعذّر بدء المحرك:**\n{message}\n\nللتشغيل الكامل: شغّل `python -m scripts.ingest` بعد إعداد `JINA_API_KEY` داخل `.env`.\n")], "", gr.update(visible=False)
-        return
-
+    # ── Retrieve via LangGraph ─────────────────────────────────────────────
     try:
-        results = retriever.retrieve(query)
+        state = fiqh_graph.invoke({"query": query, "precomputed_embedding": _vec})
+        results = nodes_to_results(state["documents"])
     except Exception as e:
-        yield history + [_msg("user", query), _msg("assistant", f"⚠️ **خطأ في الاسترجاع:**\n{e}")], "", gr.update(visible=False)
+        yield history + [_msg("user", query), _msg("assistant", f"⚠️ **تعذّر الاسترجاع:**\n{e}\n\nتأكد من وجود `qdrant_storage/` و `data/bm25_corpus.pkl`.")], "", gr.update(visible=False)
         return
 
     if not results:
@@ -90,11 +76,11 @@ def ask(query: str, history: list):
             yield history + [_msg("user", query), _msg("assistant", partial)], "", gr.update(visible=True)
         answer = "".join(answer_tokens)
     except Exception as e:
-        yield history + [_msg("user", query), _msg("assistant", f"⚠️ **خطأ في التوليد** — هل LM Studio يعمل؟\n{e}")], "", gr.update(visible=False)
+        yield history + [_msg("user", query), _msg("assistant", f"⚠️ **خطأ في التوليد** — تحقق من GOOGLE_API_KEY.\n{e}")], "", gr.update(visible=False)
         return
 
     full_response = answer + sources_block
-    cache.set(query, answer)
+    threading.Thread(target=cache.set, args=(query, answer, _vec), daemon=True).start()
     yield history + [_msg("user", query), _msg("assistant", full_response)], "", gr.update(visible=False)
 
 
@@ -292,7 +278,7 @@ HEADER_HTML = """
     <span class="badge">⚡ Jina Embeddings v3</span>
     <span class="badge">🔍 Hybrid BM25 + Semantic</span>
     <span class="badge">🏆 Jina Reranker v2</span>
-    <span class="badge">🤖 Gemma 4 · LM Studio</span>
+    <span class="badge">🤖 Gemini 2.0 Flash · Google API</span>
     <span class="badge">🗄️ Two-Tier Cache</span>
     <span class="badge">📚 46 مجلداً</span>
   </div>

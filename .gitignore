@@ -17,11 +17,15 @@ build/
 .mypy_cache/
 .ruff_cache/
 
+# Nested project copies
+yaqeen-llm-core/
+
 # Generated artifacts — large binary/runtime data, not tracked in git
 data/              # BM25 corpus pickle (~248 MB)
 qdrant_storage/    # Qdrant vector DB (~511 MB)
 qdrant_cache/      # Qdrant semantic cache
 fiqh_data/         # Source JSONL dataset (~45 MB) — use Git LFS or share separately
+*.tmp              # atomic write temp files (BM25 pickle, embed checkpoint)
 
 # Test output
 smoke_report.md

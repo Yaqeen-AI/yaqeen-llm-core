@@ -4,9 +4,14 @@ numpy>=1.26.0
 requests>=2.31.0
 python-dotenv>=1.0.0
 tqdm>=4.66.0
-openai>=1.30.0
+google-genai>=1.0.0
 gradio>=4.0.0
 redis>=5.0.0
-# torch (optional) — enables GPU-accelerated BM25 hashing
-# Python 3.14 + CUDA 12.6 nightly (works on CUDA 13.x drivers via backward compat):
-#   pip install --pre torch --index-url https://download.pytorch.org/whl/nightly/cu126
+llama-index-core>=0.12.0
+langgraph>=0.4.0
+fastapi>=0.115.0
+uvicorn>=0.30.0
+sentence-transformers>=3.0.0
+# torch — GPU acceleration (BM25 hashing, local embeddings, local reranker).
+# RTX 3080 Ti / CUDA 12.6:
+#   pip install torch --index-url https://download.pytorch.org/whl/cu126

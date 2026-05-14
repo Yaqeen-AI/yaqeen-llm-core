@@ -96,15 +96,15 @@ normalize_corpus = normalize
 _MAZHAB_PATTERNS: dict[str, list[re.Pattern]] = {
     "حنفي": [re.compile(p) for p in [
         r"الحنفي[ةه]?",
-        r"الأحناف",
-        r"أبو حنيفة",
+        r"الاحناف",
+        r"ابو حنيفة",
         r"ابن عابدين",
         r"السرخسي",
         r"الكاساني",
     ]],
     "مالكي": [re.compile(p) for p in [
         r"المالكي[ةه]?",
-        r"الإمام مالك",
+        r"الامام مالك",
         r"القرافي",
         r"الحطاب",
         r"ابن عبد البر",
@@ -112,7 +112,7 @@ _MAZHAB_PATTERNS: dict[str, list[re.Pattern]] = {
     ]],
     "شافعي": [re.compile(p) for p in [
         r"الشافعي[ةه]?",
-        r"الإمام الشافعي",
+        r"الامام الشافعي",
         r"النووي",
         r"الرافعي",
         r"الماوردي",
@@ -129,20 +129,114 @@ _MAZHAB_PATTERNS: dict[str, list[re.Pattern]] = {
     "جمهور": [re.compile(p) for p in [
         r"الجمهور",
         r"جمهور الفقهاء",
-        r"المذاهب الأربعة",
+        r"المذاهب الاربعة",
         r"اتفق الفقهاء",
-        r"أجمع الفقهاء",
+        r"اجمع الفقهاء",
     ]],
 }
 
 
 def detect_mazhabs(text: str) -> list[str]:
     """Return sorted list of mazhab keys mentioned in text."""
+    text = normalize(text)  # strip diacritics + unify alef variants before matching
     return sorted(
         name
         for name, patterns in _MAZHAB_PATTERNS.items()
         if any(p.search(text) for p in patterns)
     )
+
+
+# ── Fiqh topic detection ─────────────────────────────────────────────────────
+
+# Minimum pattern hits before a topic filter is trusted.
+# 1 works well for targeted short Fiqh questions (e.g. "ما حكم الزكاة؟").
+# Raise to 2 if you see false-positive filters on long general queries.
+_MIN_TOPIC_SCORE = 1
+
+_FIQH_TOPIC_PATTERNS: dict[str, list[re.Pattern]] = {
+    # Root r"وضو" catches وضوء/الوضوء/وضوءه/توضأ-derived forms better than exact r"وضوء"
+    "طهارة": [re.compile(p) for p in [
+        r"وضو",                              # root — catches all wudu forms
+        r"طهار[ةه]", r"نجاس[ةه]",
+        r"غسل", r"تيمم",
+        r"حيض", r"حايض", r"نفاس",
+        r"جناب[ةه]", r"استنجاء", r"استجمار",
+        r"خفين", r"المسح على الخف",
+        r"سواك",
+        r"مياه", r"ماء مستعمل",
+    ]],
+    "صلاة": [re.compile(p) for p in [
+        r"صلا[ةه]", r"صلوات",
+        r"اذان", r"اقام[ةه]",
+        r"ركع[ةه]", r"سجود", r"ركوع",
+        r"قبل[ةه]", r"مسجد",
+        r"جماع[ةه]",
+        r"الامام[ةه]",
+        r"قصر الصلا",
+        r"سجود السهو", r"سهو",
+        r"الجمع[ةه]", r"تشهد", r"وتر",
+    ]],
+    "زكاة": [re.compile(p) for p in [
+        r"زكا[ةه]", r"نصاب", r"الفطر", r"صدق[ةه]", r"العشر",
+        r"عروض التجار[ةه]?",
+        r"ركاز",
+        r"غنم", r"ابل", r"بقر",
+    ]],
+    "صيام": [re.compile(p) for p in [
+        r"صوم", r"صيام", r"رمضان", r"افطار", r"سحور", r"اعتكاف",
+    ]],
+    "حج": [re.compile(p) for p in [
+        r"حج", r"عمر[ةه]", r"احرام", r"طواف", r"سعي",
+        r"مك[ةه]", r"مني", r"عرف[ةه]", r"مزدلف[ةه]",
+    ]],
+    # معاملات split into two sub-categories (~12% each vs. 25% combined)
+    # Old Qdrant data tagged "معاملات" falls back gracefully via the retriever fallback.
+    "بيوع": [re.compile(p) for p in [
+        r"بيع", r"شراء", r"تجار[ةه]", r"ربا",
+        r"بيع السلم", r"عقد السلم",
+        r"الصرف",
+        r"خيار",
+        r"الغرر", r"المجهول",
+    ]],
+    "الشركات والديون": [re.compile(p) for p in [
+        r"اجار[ةه]", r"مضارب[ةه]", r"شرك[ةه]", r"وكال[ةه]",
+        r"قرض", r"الدين", r"رهن", r"كفال[ةه]", r"ضمان",
+    ]],
+    "نكاح": [re.compile(p) for p in [
+        r"نكاح", r"زواج", r"مهر", r"الولي", r"الزوجين", r"عقد الزواج",
+    ]],
+    "طلاق": [re.compile(p) for p in [
+        r"طلاق", r"خلع", r"رجع[ةه]", r"العد[ةه]", r"ايلاء", r"ظهار", r"فسخ",
+    ]],
+    "ميراث": [re.compile(p) for p in [
+        r"ميراث", r"الارث", r"وصي[ةه]", r"ترك[ةه]", r"الوارث", r"الفرائض",
+    ]],
+    "جنايات": [re.compile(p) for p in [
+        r"قتل", r"قصاص", r"الدي[ةه]", r"حدود", r"سرق[ةه]", r"قذف", r"زنا",
+        r"تعزير",
+        r"حراب[ةه]",
+        r"رد[ةه]",
+    ]],
+}
+
+
+def detect_fiqh_topic(text: str) -> list[str] | None:
+    """
+    Return the Fiqh topic(s) found in text, or None.
+
+    - None      → no hits or below _MIN_TOPIC_SCORE → full-corpus search
+    - ["topic"] → single clear winner → narrow to that topic slice
+    - ["t1","t2"] → tie → union search across both slices (still a corpus reduction)
+    """
+    normalized = normalize(text)
+    scores: dict[str, int] = {
+        topic: sum(1 for p in patterns if p.search(normalized))
+        for topic, patterns in _FIQH_TOPIC_PATTERNS.items()
+    }
+    top_score = max(scores.values())
+    if top_score < _MIN_TOPIC_SCORE:
+        return None
+    return [t for t, s in scores.items() if s == top_score]
 
 
 # ── Citation formatting ───────────────────────────────────────────────────────
