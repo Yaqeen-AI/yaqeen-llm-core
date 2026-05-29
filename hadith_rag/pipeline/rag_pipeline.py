@@ -5,7 +5,7 @@
 #   Query → Preprocess → Hybrid Retrieve → Rerank → Generate → Answer
 #
 # Supports two modes:
-#   1. Hybrid mode: Dense (Jina/ChromaDB) + Sparse (TF-IDF char n-gram) + RRF fusion
+#   1. Hybrid mode: Dense (Jina/Qdrant) + Sparse (TF-IDF/BM25) + RRF fusion
 #   2. Dense-only mode: Falls back if TF-IDF index not available
 #
 # Features:
@@ -19,6 +19,7 @@
 import logging
 import re
 import time
+from collections import OrderedDict
 from typing import Optional, Literal
 from dataclasses import dataclass, field
 
@@ -37,6 +38,18 @@ _TASHKEEL = re.compile(r"[\u0610-\u061A\u064B-\u065F\u0670\u06D6-\u06ED]+")
 _TATWEEL = re.compile(r"\u0640+")
 _WHITESPACE = re.compile(r"\s+")
 _ALEF_VARIANTS = re.compile(r"[أإآٱ]")
+_EXACT_LOOKUP_RERANK_MIN_OVERLAP = 0.45
+_TIMING_FLAG_KEYS = {
+    "generate_cache_hit",
+    "generation_fast_path",
+    "rerank_skipped_exact_lookup",
+    "generation_thinking_config_retry",
+}
+_TIMING_METADATA_KEYS = {
+    "generation_prompt_chars",
+    "generation_max_output_tokens",
+    "generation_thinking_budget",
+}
 
 
 def _normalize_source_name(source: str) -> str:
@@ -111,6 +124,64 @@ def _ensure_primary_in_reranked(
     return forced
 
 
+def _tokenize_lookup_text(text: str) -> set[str]:
+    normalized = _normalize_source_name(text).replace("ة", "ه")
+    tokens = re.findall(r"[\u0600-\u06FF]{3,}", normalized)
+    stopwords = {
+        "حديث", "اشرح", "شرح", "فسر", "معنى", "قال", "عن", "على", "الى",
+        "إلى", "هذا", "هذه", "الحديث", "النبي", "رسول", "الله", "صلى",
+        "عليه", "وسلم", "الراوي", "الدرجه", "المتن",
+    }
+    return {token for token in tokens if token not in stopwords}
+
+
+def _lookup_overlap(query_text: str, hadith: RetrievedHadith) -> float:
+    query_tokens = _tokenize_lookup_text(query_text)
+    hadith_tokens = _tokenize_lookup_text(hadith.text_ar)
+    if not query_tokens or not hadith_tokens:
+        return 0.0
+    return len(query_tokens & hadith_tokens) / len(query_tokens)
+
+
+def _can_skip_rerank_for_exact_lookup(
+    processed_query_type: QueryType,
+    lookup_text: str,
+    retrieved_hadiths: list[RetrievedHadith],
+) -> bool:
+    if processed_query_type not in {QueryType.EXPLAIN_HADITH, QueryType.HADITH_LOOKUP}:
+        return False
+    if not retrieved_hadiths:
+        return False
+    best_overlap = max(_lookup_overlap(lookup_text, hadith) for hadith in retrieved_hadiths[:5])
+    return best_overlap >= _EXACT_LOOKUP_RERANK_MIN_OVERLAP
+
+
+def _format_seconds(duration: object) -> str:
+    try:
+        value = float(duration)
+    except (TypeError, ValueError):
+        return str(duration)
+    if value <= 0 or value < 0.001:
+        return "<0.001s"
+    if value < 1:
+        return f"{value:.3f}s"
+    return f"{value:.2f}s"
+
+
+def _format_timing_entry(key: str, value: object) -> str:
+    if key in _TIMING_FLAG_KEYS:
+        return "yes" if bool(value) else "no"
+    if key == "generation_prompt_chars":
+        return f"{int(value):,} chars"
+    if key == "generation_max_output_tokens":
+        return f"{int(value):,} tokens"
+    if key == "generation_thinking_budget":
+        return "disabled" if int(value) < 0 else str(int(value))
+    if key in _TIMING_METADATA_KEYS:
+        return str(value)
+    return _format_seconds(value)
+
+
 @dataclass
 class RAGResponse:
     """Complete response from the Hadith RAG pipeline."""
@@ -140,7 +211,7 @@ class RAGResponse:
 
         timing_str = "\n⏱️ التوقيت:\n"
         for stage, duration in self.timing.items():
-            timing_str += f"  {stage}: {duration:.2f}s\n"
+            timing_str += f"  {stage}: {_format_timing_entry(stage, duration)}\n"
 
         # Grounding status
         grounding = ""
@@ -191,9 +262,9 @@ class HadithRAGPipeline:
     Stages:
     0. [LOCAL] Query-type routing (greeting/out-of-scope → early exit)
     1. [LOCAL] Query preprocessing (normalize, classify, expand, transliterate)
-    2. [LOCAL] Hybrid retrieval: Dense (Jina→ChromaDB) + Sparse (TF-IDF char n-gram)
+    2. [LOCAL] Hybrid retrieval: Dense (Jina -> Qdrant) + Sparse (TF-IDF/BM25)
     3. [LOCAL] RRF fusion + canonical group deduplication
-    4. [LOCAL] BGE reranker cross-encoder scoring (20 → 5)
+    4. [LOCAL→API] Jina reranking (20 → 5)
     5. [LOCAL→API] Query-type-aware generation with citation grounding
 
     All stages run on CPU. GPU is only needed for the Colab
@@ -216,8 +287,46 @@ class HadithRAGPipeline:
         self.reranker = reranker or HadithReranker()
         self.generator = generator or HadithGenerator()
         self._embedding_cache = self.hybrid_retriever.embedding_cache
+        self._response_cache: OrderedDict[tuple, GeneratedResponse] = OrderedDict()
+        self._response_cache_size = max(0, settings.RESPONSE_CACHE_SIZE)
 
         logger.info("✅ Hadith RAG Pipeline initialized successfully")
+
+    def _build_generation_cache_key(
+        self,
+        query: str,
+        hadiths: list[RetrievedHadith],
+        query_type: str,
+        metadata_fields: list[str] | None,
+        excluded_masdar: list[str] | None,
+        temperature: float,
+    ) -> tuple:
+        return (
+            query.strip(),
+            query_type,
+            tuple(metadata_fields or []),
+            tuple(excluded_masdar or []),
+            round(float(temperature), 3),
+            settings.GEMINI_MODEL,
+            tuple((h.id, h.grade, h.ruling) for h in hadiths),
+        )
+
+    def _get_cached_generation(self, key: tuple) -> GeneratedResponse | None:
+        if self._response_cache_size <= 0:
+            return None
+        generation = self._response_cache.get(key)
+        if generation is None:
+            return None
+        self._response_cache.move_to_end(key)
+        return generation
+
+    def _cache_generation(self, key: tuple, generation: GeneratedResponse) -> None:
+        if self._response_cache_size <= 0:
+            return
+        self._response_cache[key] = generation
+        self._response_cache.move_to_end(key)
+        while len(self._response_cache) > self._response_cache_size:
+            self._response_cache.popitem(last=False)
 
     def query(
         self,
@@ -348,6 +457,8 @@ class HadithRAGPipeline:
             gen_query_type = "narrator"
         elif processed.query_type == QueryType.EXPLAIN_HADITH:
             gen_query_type = "explain_hadith"
+        elif processed.query_type == QueryType.HADITH_LOOKUP:
+            gen_query_type = "hadith_lookup"
 
         if not retrieved_hadiths:
             logger.warning("No hadiths retrieved")
@@ -360,6 +471,7 @@ class HadithRAGPipeline:
                 metadata_fields=processed.metadata_fields if processed.metadata_fields else None,
                 excluded_masdar=processed.excluded_masdar if processed.excluded_masdar else None,
             )
+            timing.update(generation.timing)
             timing["total"] = time.time() - total_start
             return RAGResponse(
                 query=user_query,
@@ -375,16 +487,27 @@ class HadithRAGPipeline:
             )
 
         # ──────────────────────────────────────────────
-        # Stage 4: Reranking [LOCAL — CPU]
+        # Stage 4: Reranking [LOCAL→API — Jina]
         # ──────────────────────────────────────────────
         t0 = time.time()
         logger.info(f"Stage 4: Reranking {len(retrieved_hadiths)} candidates...")
 
-        reranked_hadiths = self.reranker.rerank(
-            query=user_query,
-            candidates=retrieved_hadiths,
-            top_k=rerank_top_k,
-        )
+        rerank_limit = rerank_top_k or settings.RERANK_TOP_K
+        if _can_skip_rerank_for_exact_lookup(
+            processed_query_type=processed.query_type,
+            lookup_text=getattr(processed, "dense_query", "") or getattr(processed, "normalized", user_query),
+            retrieved_hadiths=retrieved_hadiths,
+        ):
+            reranked_hadiths = retrieved_hadiths[:rerank_limit]
+            timing["rerank_skipped_exact_lookup"] = 1.0
+            logger.info("Stage 4: Skipping reranker for high-overlap exact lookup.")
+        else:
+            reranked_hadiths = self.reranker.rerank(
+                query=user_query,
+                candidates=retrieved_hadiths,
+                top_k=rerank_top_k,
+            )
+            timing["rerank_skipped_exact_lookup"] = 0.0
         reranked_hadiths = _ensure_primary_in_reranked(reranked_hadiths, retrieved_hadiths)
         timing["rerank"] = time.time() - t0
 
@@ -399,16 +522,38 @@ class HadithRAGPipeline:
             f"(type={gen_query_type}, metadata_fields={processed.metadata_fields})"
         )
 
-        generation = self.generator.generate(
+        metadata_fields = processed.metadata_fields if processed.metadata_fields else None
+        excluded_masdar = processed.excluded_masdar if processed.excluded_masdar else None
+        cache_key = self._build_generation_cache_key(
             query=user_query,
             hadiths=reranked_hadiths,
-            temperature=temperature,
-            verify_grounding=True,
             query_type=gen_query_type,
-            metadata_fields=processed.metadata_fields if processed.metadata_fields else None,
-            excluded_masdar=processed.excluded_masdar if processed.excluded_masdar else None,
+            metadata_fields=metadata_fields,
+            excluded_masdar=excluded_masdar,
+            temperature=temperature,
         )
+        cached_generation = self._get_cached_generation(cache_key)
+        if cached_generation is not None:
+            generation = cached_generation
+            timing["generate_cache_hit"] = 1.0
+            logger.info("Stage 5: Generation cache hit")
+        else:
+            generation = self.generator.generate(
+                query=user_query,
+                hadiths=reranked_hadiths,
+                temperature=temperature,
+                verify_grounding=True,
+                query_type=gen_query_type,
+                metadata_fields=metadata_fields,
+                excluded_masdar=excluded_masdar,
+            )
+            self._cache_generation(cache_key, generation)
+            timing["generate_cache_hit"] = 0.0
         timing["generate"] = time.time() - t0
+        if cached_generation is None:
+            timing.update(generation.timing)
+        else:
+            timing["generation_total"] = timing["generate"]
 
         timing["total"] = time.time() - total_start
 

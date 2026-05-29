@@ -1,19 +1,12 @@
 # ============================================================
-# YaqeenAI — Reranker Module [LOCAL]
+# YaqeenAI — Reranker Module [JINA API]
 # ============================================================
-# Reranks retrieved hadith candidates using BAAI/bge-reranker-v2-m3.
-# This runs LOCALLY on CPU — only processing ~20 query-document pairs.
-#
-# DECISION: BGE reranker over Jina reranker because:
-# - Explicitly trained/evaluated on Arabic MIRACL benchmark
-# - Stronger Arabic morphological robustness
-# - Standard in Arabic IR research pipelines
-# - ~2-3 sec on CPU for 20 pairs (acceptable latency)
+# Reranks retrieved hadith candidates using Jina's hosted reranker API.
 
 import logging
 from typing import Optional
 
-from sentence_transformers import CrossEncoder
+import httpx
 
 from pipeline.config import settings
 from pipeline.retrieve import RetrievedHadith
@@ -23,28 +16,29 @@ logger = logging.getLogger(__name__)
 
 class HadithReranker:
     """
-    Cross-encoder reranker for hadith retrieval results.
+    Jina API reranker for hadith retrieval results.
 
-    Uses BAAI/bge-reranker-v2-m3 to re-score (query, document) pairs
-    and return the top-K most relevant hadiths.
-
-    The cross-encoder sees both query and document together, enabling
-    much finer-grained relevance scoring than bi-encoder similarity.
-    This is crucial for Arabic text where subtle morphological
-    differences change meaning significantly.
+    Uses Jina's multilingual reranker to re-score query/document pairs and
+    return the top-K most relevant hadiths.
     """
 
-    def __init__(self, model_name: Optional[str] = None):
+    def __init__(
+        self,
+        model_name: Optional[str] = None,
+        api_key: Optional[str] = None,
+        api_url: Optional[str] = None,
+    ):
         self.model_name = model_name or settings.RERANKER_MODEL
-        logger.info(f"Loading reranker model: {self.model_name}")
+        self.api_key = api_key or settings.JINA_API_KEY
+        self.api_url = api_url or settings.JINA_RERANK_API_URL
 
-        self.model = CrossEncoder(
-            self.model_name,
-            max_length=512,  # Sufficient for hadith matn (most are <300 tokens)
-            device="cpu",    # Explicit CPU — no GPU available locally
-        )
+        if not self.api_key:
+            raise ValueError(
+                "JINA_API_KEY is required for reranking. Set it in .env or pass it directly. "
+                "Get your key at https://jina.ai/"
+            )
 
-        logger.info("Reranker model loaded successfully (CPU mode)")
+        logger.info(f"Jina reranker ready: model={self.model_name}, url={self.api_url}")
 
     def rerank(
         self,
@@ -53,42 +47,62 @@ class HadithReranker:
         top_k: Optional[int] = None,
     ) -> list[RetrievedHadith]:
         """
-        Rerank candidate hadiths by cross-encoder relevance score.
+        Rerank candidate hadiths by Jina relevance score.
 
         Args:
             query: The user's search query (Arabic or English).
-            candidates: List of RetrievedHadith from ChromaDB (typically 20).
+            candidates: List of retrieved hadith candidates (typically 20).
             top_k: Number of top results to return (default: RERANK_TOP_K=5).
 
         Returns:
             Top-K hadiths sorted by relevance (highest first).
         """
         top_k = top_k or settings.RERANK_TOP_K
+        top_k = min(top_k, len(candidates))
 
         if not candidates:
             logger.warning("No candidates to rerank")
             return []
 
-        # Build (query, document) pairs for cross-encoder scoring
-        pairs = [(query, hadith.text_ar) for hadith in candidates]
-
         logger.info(
-            f"Reranking {len(pairs)} pairs with {self.model_name} "
+            f"Reranking {len(candidates)} documents with {self.model_name} "
             f"(selecting top {top_k})"
         )
 
-        # Score all pairs
-        scores = self.model.predict(
-            pairs,
-            batch_size=len(pairs),  # Process all at once (only ~20 pairs)
-            show_progress_bar=False,
-        )
+        headers = {
+            "Authorization": f"Bearer {self.api_key}",
+            "Content-Type": "application/json",
+        }
+        payload = {
+            "model": self.model_name,
+            "query": query,
+            "documents": [hadith.text_ar for hadith in candidates],
+            "top_n": top_k,
+            "return_documents": False,
+        }
 
-        # Attach scores and sort
-        scored_hadiths = list(zip(scores, candidates))
-        scored_hadiths.sort(key=lambda x: x[0], reverse=True)  # Highest score first
+        with httpx.Client(timeout=60.0) as client:
+            response = client.post(self.api_url, headers=headers, json=payload)
+            response.raise_for_status()
 
-        # Return top-K
+        data = response.json()
+        results = data.get("results")
+        if not isinstance(results, list):
+            raise ValueError(f"Unexpected Jina rerank response (missing results): {data}")
+        if not results:
+            raise ValueError(f"Jina rerank returned no results for {len(candidates)} candidates")
+
+        scored_hadiths: list[tuple[float, RetrievedHadith]] = []
+        for item in results:
+            index = item.get("index")
+            score = item.get("relevance_score")
+            if not isinstance(index, int) or not 0 <= index < len(candidates):
+                raise ValueError(f"Unexpected Jina rerank result index: {item}")
+            if not isinstance(score, (int, float)):
+                raise ValueError(f"Unexpected Jina rerank result score: {item}")
+            scored_hadiths.append((float(score), candidates[index]))
+
+        scored_hadiths.sort(key=lambda x: x[0], reverse=True)
         reranked = [hadith for _, hadith in scored_hadiths[:top_k]]
 
         logger.info(
@@ -122,7 +136,6 @@ def rerank(
 
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO)
-    # Quick test: just load the model to verify it works
     reranker = HadithReranker()
     print(f"Reranker loaded: {reranker.model_name}")
-    print("Model ready for inference on CPU.")
+    print("Jina reranker client ready.")

@@ -84,7 +84,7 @@ _SPECIFIC_HADITH_MARKERS = [
 ]
 
 # Refusal message returned when no context chunks are available.
-_NO_CONTEXT_REPLY = "لا يوجد معلومات كافية للإجابة على هذا السؤال من المصادر المتاحة."
+_NO_CONTEXT_REPLY = "لا تتوفر معلومات كافية في المصادر المتاحة للإجابة على هذا السؤال."
 
 
 def _normalize(text: str) -> str:

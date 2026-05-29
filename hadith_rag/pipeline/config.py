@@ -20,6 +20,14 @@ class Settings:
 
     # --- Paths ---
     HADITH_RAG_ROOT: Path = _HADITH_RAG_ROOT
+    
+    # --- Vector DB: Qdrant (migrated from ChromaDB) ---
+    VECTOR_DB_TYPE: str = os.getenv("VECTOR_DB_TYPE", "qdrant")  # 'qdrant' or 'chroma'
+    QDRANT_URL: str = os.getenv("QDRANT_URL", "http://localhost:6333")
+    QDRANT_COLLECTION_NAME: str = os.getenv("QDRANT_COLLECTION_NAME", "hadiths")
+    QDRANT_TIMEOUT_SECONDS: int = int(os.getenv("QDRANT_TIMEOUT_SECONDS", "30"))
+    
+    # --- ChromaDB (deprecated, kept for backward compatibility) ---
     CHROMA_PERSIST_DIR: str = os.getenv(
         "CHROMA_PERSIST_DIR",
         str(_HADITH_RAG_ROOT / "chroma_db" / "hadith_chroma_db"),
@@ -27,12 +35,16 @@ class Settings:
     CHROMA_COLLECTION_NAME: str = os.getenv(
         "CHROMA_COLLECTION_NAME", "hadiths"
     )
+    
     DATA_DIR: Path = _HADITH_RAG_ROOT / "data"
     DATASET_STATS_PATH: Path = _HADITH_RAG_ROOT / "data" / "dataset_stats.json"
 
-    # --- Jina API (query-time embedding) ---
+    # --- Jina API (query-time embedding + reranking) ---
     JINA_API_KEY: str = os.getenv("JINA_API_KEY", "")
     JINA_API_URL: str = "https://api.jina.ai/v1/embeddings"
+    JINA_RERANK_API_URL: str = os.getenv(
+        "JINA_RERANK_API_URL", "https://api.jina.ai/v1/rerank"
+    )
     JINA_EMBEDDING_MODEL: str = os.getenv(
         "JINA_EMBEDDING_MODEL", "jina-embeddings-v3"
     )
@@ -40,7 +52,7 @@ class Settings:
 
     # --- Reranker ---
     RERANKER_MODEL: str = os.getenv(
-        "RERANKER_MODEL", "BAAI/bge-reranker-v2-m3"
+        "RERANKER_MODEL", "jina-reranker-v3"
     )
 
     # --- Retrieval ---
@@ -66,6 +78,9 @@ class Settings:
     # --- Gemini --- FREE
     GEMINI_API_KEY: str = os.getenv("GEMINI_API_KEY", "")
     GEMINI_MODEL: str = os.getenv("GEMINI_MODEL", "gemma-3-27b-it")
+    GEMINI_MAX_OUTPUT_TOKENS: int = int(os.getenv("GEMINI_MAX_OUTPUT_TOKENS", "0"))
+    GEMINI_THINKING_BUDGET: int = int(os.getenv("GEMINI_THINKING_BUDGET", "0"))
+    RESPONSE_CACHE_SIZE: int = int(os.getenv("RESPONSE_CACHE_SIZE", "128"))
 
     # --- Claude (Anthropic) --- PAID
     # CLAUDE_API_KEY: str = os.getenv("CLAUDE_API_KEY", "")
