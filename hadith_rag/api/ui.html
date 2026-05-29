@@ -186,6 +186,44 @@
       font-weight: 600;
     }
 
+    .latency-card {
+      background: linear-gradient(135deg, #f8fafc 0%, #eef2ff 100%);
+      border: 1px solid #dbeafe;
+      border-radius: 8px;
+      padding: 1rem;
+    }
+    .latency-grid {
+      display: grid;
+      gap: 0.55rem;
+      grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+    }
+    .latency-item {
+      display: flex;
+      justify-content: space-between;
+      gap: 0.7rem;
+      align-items: center;
+      background: rgba(255, 255, 255, 0.82);
+      border: 1px solid #e5e7eb;
+      border-radius: 7px;
+      padding: 0.55rem 0.7rem;
+      font-size: 0.84rem;
+    }
+    .latency-name { color: #4b5563; }
+    .latency-value {
+      direction: ltr;
+      color: #0f172a;
+      font-weight: 700;
+      white-space: nowrap;
+    }
+    .latency-item.hot {
+      border-color: #fed7aa;
+      background: #fff7ed;
+    }
+    .latency-item.cache {
+      border-color: #bbf7d0;
+      background: #f0fdf4;
+    }
+
     .hadith-card {
       background: #ffffff;
       border: 1px solid #e5e7eb;
@@ -308,6 +346,11 @@
     btn.disabled = true;
     result.innerHTML = '';
     status.innerHTML = 'جارٍ المعالجة… <span class="spinner"></span>';
+    const startedAt = performance.now();
+    const ticker = setInterval(() => {
+      const elapsed = ((performance.now() - startedAt) / 1000).toFixed(1);
+      status.innerHTML = `جارٍ المعالجة… ${elapsed} ثانية <span class="spinner"></span>`;
+    }, 250);
 
     try {
       const res = await fetch('/query', {
@@ -325,6 +368,8 @@
       status.textContent = `اكتملت المعالجة في ${(data.timing?.total || 0).toFixed(1)} ثانية`;
 
       let html = '';
+
+      html += renderLatencyPanel(data.timing || {});
 
       // Evidence quality block
       html += `
@@ -401,6 +446,7 @@
       status.textContent = '';
       result.innerHTML = `<div class="error-msg">حدث خطأ: ${escHtml(e.message)}</div>`;
     } finally {
+      clearInterval(ticker);
       btn.disabled = false;
     }
   }
@@ -421,6 +467,67 @@
       partial: 'جزئية'
     };
     return map[key] || value || 'غير متاح';
+  }
+
+  function formatSeconds(value) {
+    const n = Number(value || 0);
+    if (!Number.isFinite(n)) return '—';
+    if (n < 0.005) return '<0.01s';
+    if (n < 1) return `${n.toFixed(2)}s`;
+    return `${n.toFixed(1)}s`;
+  }
+
+  function renderLatencyPanel(timing) {
+    const rows = [
+      ['total', 'الإجمالي', 'hot'],
+      ['preprocess', 'تحليل السؤال'],
+      ['hybrid_retrieval', 'الاسترجاع الهجين'],
+      ['retrieval_dense', 'الاسترجاع الدلالي'],
+      ['retrieval_tfidf', 'TF-IDF'],
+      ['retrieval_bm25', 'BM25'],
+      ['retrieval_fusion', 'دمج النتائج'],
+      ['retrieval_dedup', 'إزالة التكرار'],
+      ['rerank', 'إعادة الترتيب'],
+      ['generate', 'مرحلة التوليد', 'hot'],
+      ['generation_llm_api', 'استدعاء Gemma', 'hot'],
+      ['generation_evidence_audit', 'تدقيق الأدلة'],
+      ['generation_context_formatting', 'بناء السياق'],
+      ['generation_grounding_verification', 'فحص التوثيق'],
+      ['generation_total', 'تفاصيل التوليد'],
+    ];
+
+    const timingItems = rows
+      .filter(([key]) => timing[key] !== undefined)
+      .map(([key, label, tone]) => `
+        <div class="latency-item ${tone || ''}">
+          <span class="latency-name">${escHtml(label)}</span>
+          <span class="latency-value">${formatSeconds(timing[key])}</span>
+        </div>`)
+      .join('');
+
+    const cacheHit = Number(timing.generate_cache_hit || 0) === 1;
+    const fastPath = Number(timing.generation_fast_path || 0) === 1;
+    const rerankSkipped = Number(timing.rerank_skipped_exact_lookup || 0) === 1;
+    const promptChars = timing.generation_prompt_chars;
+    const maxTokens = timing.generation_max_output_tokens;
+    const thinkingBudget = timing.generation_thinking_budget;
+    const extras = [
+      cacheHit ? `<div class="latency-item cache"><span class="latency-name">Cache</span><span class="latency-value">hit</span></div>` : '',
+      fastPath ? `<div class="latency-item cache"><span class="latency-name">مسار سريع</span><span class="latency-value">بدون LLM</span></div>` : '',
+      rerankSkipped ? `<div class="latency-item cache"><span class="latency-name">إعادة الترتيب</span><span class="latency-value">تم تخطيها بأمان</span></div>` : '',
+      promptChars ? `<div class="latency-item"><span class="latency-name">حجم البرومبت</span><span class="latency-value">${Number(promptChars).toLocaleString()} chars</span></div>` : '',
+      maxTokens ? `<div class="latency-item"><span class="latency-name">سقف الخرج</span><span class="latency-value">${Number(maxTokens).toLocaleString()} tokens</span></div>` : '',
+      thinkingBudget !== undefined ? `<div class="latency-item"><span class="latency-name">ميزانية التفكير</span><span class="latency-value">${Number(thinkingBudget).toLocaleString()}</span></div>` : '',
+    ].filter(Boolean).join('');
+
+    if (!timingItems && !extras) return '';
+    return `
+      <div>
+        <div class="section-title">زمن المكوّنات</div>
+        <div class="latency-card">
+          <div class="latency-grid">${timingItems}${extras}</div>
+        </div>
+      </div>`;
   }
 
   function cleanupAnswerText(text) {

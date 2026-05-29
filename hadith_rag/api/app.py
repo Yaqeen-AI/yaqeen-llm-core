@@ -142,8 +142,12 @@ class HealthResponse(BaseModel):
 
 class StatsResponse(BaseModel):
     """Response body for /stats endpoint."""
-    chromadb_documents: int = 0
+    vector_db_type: str = "qdrant"
+    vector_documents: int = 0
+    qdrant_documents: int = 0
+    chromadb_documents: int = 0  # Deprecated; kept for older clients.
     tfidf_documents: int = 0
+    bm25_documents: int = 0
     embedding_cache_size: int = 0
 
 
@@ -233,10 +237,20 @@ async def log_requests(request: Request, call_next):
 @app.get("/health", response_model=HealthResponse, tags=["System"])
 async def health_check():
     """Health check endpoint."""
+    vector_db_status = "not_initialized"
+    vector_db_key = settings.VECTOR_DB_TYPE.strip().lower()
+    if _pipeline and _pipeline.hybrid_retriever.dense_retriever:
+        try:
+            _pipeline.hybrid_retriever.dense_retriever.count()
+            vector_db_status = "ok"
+        except Exception:
+            vector_db_status = "error"
+
     components = {
         "pipeline": "ok" if _pipeline is not None else "not_initialized",
-        "chromadb": "ok",
+        vector_db_key: vector_db_status,
         "tfidf": "ok" if (_pipeline and _pipeline.hybrid_retriever.tfidf.is_built) else "not_built",
+        "bm25": "ok" if (_pipeline and _pipeline.hybrid_retriever.bm25.is_built) else "not_built",
     }
     
     status = "healthy" if all(v == "ok" for v in components.values()) else "degraded"
@@ -253,19 +267,31 @@ async def get_stats():
     if _pipeline is None:
         raise HTTPException(status_code=503, detail="Pipeline not initialized")
     
-    chroma_count = 0
+    vector_count = 0
     try:
-        chroma_count = _pipeline.hybrid_retriever.dense_retriever.collection.count()
+        vector_count = _pipeline.hybrid_retriever.dense_retriever.count()
     except Exception:
         pass
     
     tfidf_count = 0
     if _pipeline.hybrid_retriever.tfidf.is_built:
         tfidf_count = len(_pipeline.hybrid_retriever.tfidf._doc_ids)
+
+    bm25_count = 0
+    if _pipeline.hybrid_retriever.bm25.is_built:
+        bm25_count = len(_pipeline.hybrid_retriever.bm25._doc_ids)
     
     return StatsResponse(
-        chromadb_documents=chroma_count,
+        vector_db_type=settings.VECTOR_DB_TYPE.strip().lower(),
+        vector_documents=vector_count,
+        qdrant_documents=vector_count
+        if settings.VECTOR_DB_TYPE.strip().lower() == "qdrant"
+        else 0,
+        chromadb_documents=vector_count
+        if settings.VECTOR_DB_TYPE.strip().lower() == "chroma"
+        else 0,
         tfidf_documents=tfidf_count,
+        bm25_documents=bm25_count,
         embedding_cache_size=_pipeline._embedding_cache.size,
     )
 
