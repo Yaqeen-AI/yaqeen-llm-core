@@ -243,7 +243,25 @@ def _identity_expansion(text: str) -> ExpandedQuery:
 # Core LLM call
 # ============================================================
 
-_SKIP_TYPES = frozenset({"metadata", "greeting", "out_of_scope", "dataset_stats"})
+_SKIP_TYPES = frozenset({
+    "metadata",
+    "hadith_lookup",
+    "explain_hadith",
+    "greeting",
+    "out_of_scope",
+    "dataset_stats",
+})
+
+
+def _is_semantic_hadith_existence_query(text: str) -> bool:
+    """Queries like 'هل يوجد حديث يشير إلى...' are already precise enough."""
+    normalized = str(text or "").strip()
+    patterns = (
+        r"^هل\s+(?:يوجد|هناك|ورد|ثبت|صح)\s+حديث\s+(?:يشير|يدل|يفيد|يتكلم|يتحدث)\s+(?:الى|الي|علي|عن|في)\s+",
+        r"^هل\s+(?:يوجد|هناك|ورد|ثبت|صح)\s+حديث\s+(?:عن|في|حول)\s+",
+        r"^(?:ابحث|هات|اعطني|اذكر)\s+(?:لي\s+)?حديث\s+(?:يشير|يدل|يفيد|يتكلم|يتحدث)\s+(?:الى|الي|علي|عن|في)\s+",
+    )
+    return any(re.search(pattern, normalized) for pattern in patterns)
 
 # ============================================================
 # Intent-specific hard-coded corpus phrase clusters
@@ -440,6 +458,9 @@ def expand_query(
         ExpandedQuery with all expansion results
     """
     if not normalized_text:
+        return _identity_expansion(normalized_text)
+
+    if _is_semantic_hadith_existence_query(normalized_text):
         return _identity_expansion(normalized_text)
 
     # Skip expansion for non-retrieval query types

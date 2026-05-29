@@ -1,11 +1,11 @@
 # ============================================================
 # YaqeenAI — Hybrid Retriever with Reciprocal Rank Fusion
 # ============================================================
-# Combines dense (ChromaDB / Jina v3) and sparse (TF-IDF char n-gram)
+# Combines dense (Qdrant / Jina v3) and sparse (TF-IDF char n-gram)
 # retrieval using Reciprocal Rank Fusion (RRF).
 #
 # Architecture:
-#   1. Dense : ChromaDB cosine similarity (Jina v3 embeddings)
+#   1. Dense : Qdrant cosine similarity (Jina v3 embeddings)
 #   2. Sparse: TF-IDF with character n-grams (3-5) — morphology-aware
 #   3. Fusion : RRF with k=60
 #   4. Dedup  : Canonical group deduplication
@@ -30,7 +30,7 @@ from threading import Lock
 from typing import Optional, Literal
 from dataclasses import dataclass, field
 
-from pipeline.config import resolve_grade_bucket, settings
+from pipeline.config import settings
 from pipeline.answer_policy import grade_priority
 from pipeline.embed_query import JinaQueryEmbedder
 from pipeline.retrieve import HadithRetriever, RetrievedHadith, RetrievalResult
@@ -214,11 +214,11 @@ def deduplicate_by_canonical_group(
 
 class HybridRetriever:
     """
-    Hybrid retriever combining dense (Jina/ChromaDB) and sparse (TF-IDF).
+    Hybrid retriever combining dense (Jina/Qdrant) and sparse (TF-IDF/BM25).
 
     Pipeline:
     1. Preprocess query (normalize, classify, expand)
-    2. Dense retrieval via ChromaDB (Jina v3 embeddings)
+    2. Dense retrieval via Qdrant (Jina v3 embeddings)
     3. Sparse retrieval via TF-IDF char n-gram index
     4. RRF fusion
     5. Canonical group deduplication
@@ -307,7 +307,7 @@ class HybridRetriever:
         
         Args:
             query: User's search query (raw text)
-            dense_top_k: Number of dense (ChromaDB) results
+            dense_top_k: Number of dense vector results
             sparse_top_k: Number of sparse (TF-IDF/BM25) results
             fused_top_k: Number of results after RRF fusion
             grade_filter: Optional grade filter(s)
@@ -347,7 +347,7 @@ class HybridRetriever:
         if effective_masdar_filter and effective_masdar_filter != masdar_filter:
             logger.info(f"Auto-detected masdar_filter from query: {repr(effective_masdar_filter)}")
 
-        # ── Step 2: Dense retrieval (Jina → ChromaDB) ──
+        # ── Step 2: Dense retrieval (Jina → vector DB) ──
         t0 = time.time()
         model_name = getattr(self.embedder, "model", "")
         dimensions = getattr(self.embedder, "dimensions", "")
@@ -432,49 +432,23 @@ class HybridRetriever:
         # Take top-K fused IDs
         fused_top = fused[:fused_top_k]
         
-        # Build hadiths from the dense results (they have full metadata)
-        # Map doc_id → hadith from dense results
+        # Build hadiths from the dense results (they have full metadata).
+        # Map canonical hadith_id → hadith from dense results.
         dense_map = {h.id: h for h in dense_result.hadiths}
         
-        # Identify TF-IDF-only IDs that need metadata from ChromaDB
+        # Identify sparse-only IDs that need metadata from the vector backend.
         sparse_only_ids = [
             doc_id for doc_id, _ in fused_top if doc_id not in dense_map
         ]
         
-        # Fetch full metadata for sparse-only results from ChromaDB
+        # Fetch full metadata for sparse-only results from the active vector backend.
         sparse_map: dict[str, RetrievedHadith] = {}
         if sparse_only_ids:
             logger.info(
-                f"Fetching {len(sparse_only_ids)} TF-IDF-only results from ChromaDB"
+                f"Fetching {len(sparse_only_ids)} sparse-only results from vector backend"
             )
             try:
-                fetched = self.dense_retriever.collection.get(
-                    ids=sparse_only_ids,
-                    include=["documents", "metadatas"],
-                )
-                if fetched["ids"]:
-                    for i, doc_id in enumerate(fetched["ids"]):
-                        metadata = fetched["metadatas"][i] if fetched["metadatas"] else {}
-                        raw_grade = metadata.get("grade", "")
-                        raw_grade_ar = metadata.get("grade_ar", "")
-                        raw_ruling = metadata.get("ruling", "")
-                        sparse_map[doc_id] = RetrievedHadith(
-                            id=doc_id,
-                            text_ar=fetched["documents"][i] if fetched["documents"] else "",
-                            distance=0.5,  # Placeholder — RRF score used for ordering
-                            grade=resolve_grade_bucket(raw_grade, raw_grade_ar, raw_ruling),
-                            grade_ar=raw_grade_ar,
-                            ruling=raw_ruling,
-                            rawi=metadata.get("rawi", ""),
-                            muhaddith=metadata.get("mohadeth", ""),       # stored as 'mohadeth' in ChromaDB
-                            masdar=metadata.get("book", ""),              # stored as 'book' in ChromaDB
-                            safha_raqam=str(metadata.get("numberOrPage", "")),  # stored as 'numberOrPage' in ChromaDB
-                            category=metadata.get("category", ""),
-                            subcategory_name=metadata.get("subcategory_name", ""),
-                            hadith_tag=metadata.get("hadith_tag", ""),
-                            has_explanation=str(metadata.get("hasExplanation", "False")).lower() == "true",  # stored as 'hasExplanation'
-                            canonical_group_id=metadata.get("canonical_group_id", ""),
-                        )
+                sparse_map = self.dense_retriever.get_by_ids(sparse_only_ids)
             except Exception as e:
                 logger.warning(f"Failed to fetch sparse-only results: {e}")
         
@@ -490,13 +464,13 @@ class HybridRetriever:
                 hadith.distance = 1.0 - rrf_score
                 fused_hadiths.append(hadith)
             else:
-                logger.debug(f"Skipping {doc_id}: not found in ChromaDB")
+                logger.debug(f"Skipping {doc_id}: not found in vector backend")
         
         timing["fusion"] = time.time() - t0
         
         # ── Step 4b: Post-fusion grade/masdar filter ──
-        # Dense retrieval applies the filter at the ChromaDB level, but
-        # sparse (TF-IDF) results fetched via collection.get() bypass the
+        # Dense retrieval applies the filter at the vector DB level, but
+        # sparse results fetched by ID bypass the
         # filter.  Re-apply here so no unfiltered hadiths leak through.
         if grade_filter or effective_masdar_filter:
             t0 = time.time()

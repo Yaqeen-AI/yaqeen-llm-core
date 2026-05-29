@@ -62,7 +62,7 @@ class ProcessedQuery:
     multi_queries: list[str] = field(default_factory=list)   # All query variants for multi-query retrieval
     expansion_tokens: list[str] = field(default_factory=list) # Additional tokens added by expander
     # ── Book/source filter extracted from query text ────────
-    extracted_masdar: str | list[str] = ""  # Book name(s) detected in query; list when multiple ChromaDB entries exist
+    extracted_masdar: str | list[str] = ""  # Book name(s) detected in query; list when multiple source aliases exist
     excluded_masdar: list[str] = field(default_factory=list)  # Books to exclude (e.g. "ولم تذكر في صحيح مسلم")
 
 
@@ -264,15 +264,15 @@ def is_dataset_stats_query(text: str) -> bool:
 # Book / Source Name Detection
 # ============================================================
 
-# Maps query mentions → canonical masdar values stored in ChromaDB (field 'book')
-# Keys are patterns that may appear in queries; values are exact ChromaDB masdar strings.
+# Maps query mentions -> canonical masdar values stored in vector payload field 'book'.
+# Keys are patterns that may appear in queries; values are exact payload masdar strings.
 # NOTE: all patterns use alef-normalized forms (أ إ آ → ا) for robust matching.
 _BOOK_NAME_MAP: list[tuple[re.Pattern, str | list[str]]] = [
     # Sahih Bukhari
     (re.compile(r"(صحيح\s*البخاري|البخاري|بخاري|bukhari)", re.IGNORECASE), "صحيح البخاري"),
     # Sahih Muslim
     (re.compile(r"(صحيح\s*مسلم|مسلم|muslim)", re.IGNORECASE), "صحيح مسلم"),
-    # Sunan Abi Dawud — two ChromaDB entries: 'سنن أبي داود' (1,481) + 'صحيح أبي داود' (3,965)
+    # Sunan Abi Dawud has two source aliases: 'سنن أبي داود' and 'صحيح أبي داود'.
     (re.compile(r"(سنن\s*ابي?\s*داود|ابو?\s*داود|ابي\s*داود|abu\s*daw[ou]d)", re.IGNORECASE), ["سنن أبي داود", "صحيح أبي داود"]),
     # Sunan al-Tirmidhi
     (re.compile(r"(سنن\s*الترمذي|الترمذي|ترمذي|tirmidhi)", re.IGNORECASE), "سنن الترمذي"),
@@ -316,7 +316,7 @@ def detect_book_filter(text: str) -> tuple[str | list[str], list[str]]:
     Returns:
         (extracted_masdar, excluded_masdars)
         - extracted_masdar: book to INCLUDE; str for single book or list[str] for multiple
-          ChromaDB variants of the same book (e.g. Abi Dawud has two entries)
+          source aliases of the same book (e.g. Abi Dawud has two entries)
         - excluded_masdars: books to EXCLUDE (applied post-retrieval by the LLM prompt)
     """
     extracted_masdar: str | list[str] = ""
