@@ -52,15 +52,36 @@ class GeminiLLM(CustomLLM):
         )
 
     def complete(self, prompt: str, **kwargs) -> CompletionResponse:
-        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as ex:
-            future = ex.submit(
-                self._client.models.generate_content,
-                model=self.model_name,
-                contents=prompt,
-                config=self._gen_config,
-            )
-            response = future.result(timeout=45)
-        return CompletionResponse(text=_extract_text(response))
+        last_exc: Exception | None = None
+        for attempt in range(4):
+            try:
+                with concurrent.futures.ThreadPoolExecutor(max_workers=1) as ex:
+                    future = ex.submit(
+                        self._client.models.generate_content,
+                        model=self.model_name,
+                        contents=prompt,
+                        config=self._gen_config,
+                    )
+                    response = future.result(timeout=120)
+                text = _extract_text(response)
+                return CompletionResponse(text=text)
+            except Exception as e:
+                err = str(e)
+                is_rate_limit = any(x in err for x in ("429", "RESOURCE_EXHAUSTED", "quota"))
+                is_transient  = any(x in err for x in ("500", "503", "INTERNAL", "UNAVAILABLE"))
+                if is_rate_limit:
+                    last_exc = e
+                    if attempt < 3:
+                        print(f"  [gen] Rate-limited (attempt {attempt+1}/4); waiting 65s…")
+                        time.sleep(65)
+                    continue
+                if is_transient:
+                    last_exc = e
+                    if attempt < 3:
+                        time.sleep(2 ** (attempt + 1))  # 2s, 4s, 8s
+                    continue
+                raise
+        raise last_exc or RuntimeError("Generation failed after 4 attempts")
 
     def stream_complete(self, prompt: str, **kwargs) -> CompletionResponseGen:
         def _gen() -> Generator[CompletionResponse, None, None]:

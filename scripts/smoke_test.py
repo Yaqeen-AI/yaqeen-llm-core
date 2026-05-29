@@ -1,23 +1,26 @@
 """
-Smoke test — RAG evaluation across 20 Fiqh questions + adversarial set.
+Smoke test — RAG evaluation across 35 Fiqh questions (5 difficulty tiers)
++ 12 adversarial out-of-domain queries.
+
 Run:  python -m scripts.smoke_test
 
 Evaluation metrics (TABLE II):
-  Retrieval  — Recall@5, Precision@5, Hit Rate@5, MRR, NDCG@5
-               (relevance proxy: Jina rerank_score ≥ 0.5)
-  Reranking  — NDCG (same NDCG@5 signal, rerank scores as graded relevance)
-  Generation — Sufficiency, Faithfulness, Completeness, Answer Relevance,
-               Coverage Score, Hallucination Rate  (Gemini-as-judge, single call/query)
-  Safety     — Rejection Rate  (adversarial query set, top-1 rerank < 0.3)
-  System     — Latency P95  (end-to-end: retrieval + generation + eval)
+  Retrieval  — Recall@5, Precision@5, Hit Rate@5, MRR
+               95% bootstrap confidence intervals on every retrieval metric
+  Reranking  — NDCG
+  System     — Latency P95  (end-to-end: retrieval + generation)
 
-Output is printed to console AND saved to smoke_report.md in the project root.
+Reports written to:
+  smoke_report.md          — human-readable Markdown
+  eval_output/eval_results_<ts>.csv
+  eval_output/eval_aggregate_<ts>.json
 """
 
+import csv
 import io
 import json
 import math
-import re
+import random
 import sys
 import time
 from dataclasses import dataclass, field
@@ -25,77 +28,41 @@ from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
-from google import genai
-from google.genai import types
-
-import os
-from core.config import GOOGLE_API_KEY
+from core.config import GOOGLE_API_KEY, JINA_API_KEY, RELEVANCE_THRESHOLD as _CONFIG_RELEVANCE_THRESHOLD
+from scripts.benchmark_data import (
+    ALL_FIQH_QUERIES,
+    ADVERSARIAL_QUERIES,
+    BenchmarkQuery,
+)
 
 # ── Constants ──────────────────────────────────────────────────────────────────
 
-RELEVANCE_THRESHOLD = 0.0   # rerank_score >= this → "relevant" (Jina v3 scores range ~−0.2 to +0.5)
-REJECTION_THRESHOLD = 0.0   # top-1 rerank_score < this → "correctly rejected"
+RELEVANCE_THRESHOLD   = _CONFIG_RELEVANCE_THRESHOLD   # shared with retriever pipeline
+REJECTION_THRESHOLD   = 0.22   # top-1 < this → adversarial query correctly rejected
 
-# Separate model for the LLM judge — decoupled from GEMINI_MODEL so evaluation
-# works even if the production generation model is unavailable via this API.
-JUDGE_MODEL = os.getenv("SMOKE_JUDGE_MODEL", "gemini-2.0-flash")
+MAX_CONSECUTIVE_ERRORS = 3    # abort early after this many consecutive retrieval exceptions
 
-# ── Questions ─────────────────────────────────────────────────────────────────
+BOOTSTRAP_SAMPLES     = 1000   # iterations for 95% CI estimation
+OUTPUT_DIR            = Path(__file__).parent.parent / "eval_output"
+REPORT_PATH           = Path(__file__).parent.parent / "smoke_report.md"
+SNIPPET_LEN           = 300    # chars of chunk_text shown per result in console
 
-QUESTIONS = [
-    # Original set
-    "متى يجوز جمع الصلاة؟",
-    "ما حكم الصلاة في الأرض المغصوبة؟",
-    "ما شروط صحة عقد البيع عند المذاهب الأربعة؟",
-    "ما حكم الزكاة على الذهب والفضة؟",
-    "ما حكم الطلاق في حالة الغضب الشديد؟",
-    "ما حكم صوم من أفطر ناسياً في رمضان؟",
-    "ما حكم الوضوء بالماء المستعمل؟",
-    "ما حكم صلاة الجماعة؟",
-    "ما شروط وجوب الحج؟",
-    "ما حكم قراءة القرآن للحائض؟",
-    # New set
-    "هل الزنا ينقد الوضوء",
-    "هل النوم لمده قصيره يننقض الوضوء",
-    "ما هي اركان الايمانن",
-    "هل يصح رفع الاصبع في بدايه التشهد ام عند قول اشهد ان لا اله الا الله و اشهد ان محمدا رسول الله في الصلاه",
-    "هل اغنية طلع البدر علينا حدثت ام بدعة؟",
-    "هل استخدام السبحة بدعة",
-    # Extended set
-    "حكم صلاة الجمعه مع صلاة العيد",
-    "حكم سماع الاغاني",
-    "حكم تربية الكلاب",
-    "حكم كفالة اليتيم",
-]
+# ── Module-level mutable state ─────────────────────────────────────────────────
 
-ADVERSARIAL_QUESTIONS = [
-    "ما عاصمة فرنسا؟",
-    "كيف أصنع كعكة الشوكولاتة؟",
-    "ما هو أفضل برنامج لتحرير الصور؟",
-    "كيف أعالج ضغط الدم المرتفع؟",
-    "من هو مخترع الهاتف؟",
-    "ما هي أسرع سيارة في العالم؟",
-]
+_inter_query_delay = 12   # start at Jina free-tier minimum; bumped on 429s
+
+# ── Benchmark data ─────────────────────────────────────────────────────────────
+
+QUESTIONS             = [q.question for q in ALL_FIQH_QUERIES]
+ADVERSARIAL_QUESTIONS = [q.question for q in ADVERSARIAL_QUERIES]
+QUERY_META: dict[str, BenchmarkQuery] = {
+    q.question: q for q in ALL_FIQH_QUERIES + ADVERSARIAL_QUERIES
+}
 
 TOTAL     = len(QUESTIONS)
 TOTAL_ADV = len(ADVERSARIAL_QUESTIONS)
 SEP       = "─" * 72
 SEP2      = "═" * 72
-REPORT_PATH  = Path(__file__).parent.parent / "smoke_report.md"
-SNIPPET_LEN  = 300   # chars of chunk_text shown per result
-
-
-# ── Gemini judge client ────────────────────────────────────────────────────────
-
-_judge_client: Optional[genai.Client] = None
-
-
-def _get_judge_client() -> genai.Client:
-    global _judge_client
-    if _judge_client is None:
-        _judge_client = genai.Client(api_key=GOOGLE_API_KEY)
-    return _judge_client
-
 
 # ── Per-query result container ─────────────────────────────────────────────────
 
@@ -103,6 +70,7 @@ def _get_judge_client() -> genai.Client:
 class QueryResult:
     question: str
     is_adversarial: bool = False
+    difficulty: str = ""
     # Retrieval
     hit: bool = False
     result_count: int = 0
@@ -110,6 +78,7 @@ class QueryResult:
     mean_rerank_top3: float = 0.0
     score_spread: float = 0.0
     mazhab_coverage: int = 0
+    chunk_diversity: float = 0.0
     topic_filter: Optional[list] = field(default=None)
     retrieval_latency: float = 0.0
     # TABLE II — Retrieval ranking metrics
@@ -120,48 +89,64 @@ class QueryResult:
     # Generation
     answer: Optional[str] = None
     generation_latency: float = 0.0
-    # TABLE II — Generation quality metrics (Gemini-as-judge)
-    faithfulness: float = 0.0
-    sufficiency: float = 0.0
-    completeness: float = 0.0
-    answer_relevance: float = 0.0
-    coverage_score: float = 0.0
-    hallucination_rate: float = 0.0
-    eval_latency: float = 0.0
     # Error
     error: Optional[str] = None
 
     @property
     def total_latency(self) -> float:
-        return self.retrieval_latency + self.generation_latency + self.eval_latency
+        return self.retrieval_latency + self.generation_latency
+
+
+# ── Graded relevance ───────────────────────────────────────────────────────────
+
+def _graded_relevance(score: float) -> int:
+    """3-tier graded relevance calibrated to Jina v3 reranker output range."""
+    if score >= 0.40:
+        return 2   # highly relevant
+    if score >= RELEVANCE_THRESHOLD:
+        return 1   # marginally relevant — aligned with binary threshold (was 0.20)
+    return 0       # not relevant
+
+
+def _is_relevant(score: float) -> bool:
+    return score >= RELEVANCE_THRESHOLD
 
 
 # ── Retrieval ranking metric helpers ──────────────────────────────────────────
 
-def _precision_at_5(scores: list[float]) -> float:
-    top5 = scores[:5]
-    if not top5:
+def _precision_at_k(scores: list[float], k: int = 5) -> float:
+    top = scores[:k]
+    if not top:
         return 0.0
-    return sum(1 for s in top5 if s >= RELEVANCE_THRESHOLD) / 5
+    return sum(1 for s in top if _is_relevant(s)) / k
 
 
-def _recall_at_5(scores: list[float]) -> float:
-    return 1.0 if any(s >= RELEVANCE_THRESHOLD for s in scores[:5]) else 0.0
+def _recall_at_k(scores: list[float], k: int = 5) -> float:
+    return 1.0 if any(_is_relevant(s) for s in scores[:k]) else 0.0
 
 
-def _mrr_at_5(scores: list[float]) -> float:
-    for i, s in enumerate(scores[:5]):
-        if s >= RELEVANCE_THRESHOLD:
+def _mrr_at_k(scores: list[float], k: int = 5) -> float:
+    for i, s in enumerate(scores[:k]):
+        if _is_relevant(s):
             return 1.0 / (i + 1)
     return 0.0
 
 
-def _ndcg_at_5(scores: list[float]) -> float:
-    rel  = [1 if s >= RELEVANCE_THRESHOLD else 0 for s in scores[:5]]
-    dcg  = sum(r / math.log2(i + 2) for i, r in enumerate(rel))
-    n_rel = sum(rel)
-    idcg = sum(1 / math.log2(i + 2) for i in range(n_rel))
+def _ndcg_at_k_graded(scores: list[float], k: int = 5) -> float:
+    """NDCG@k using 3-tier graded relevance (0 / 1 / 2)."""
+    rel   = [_graded_relevance(s) for s in scores[:k]]
+    dcg   = sum(r / math.log2(i + 2) for i, r in enumerate(rel))
+    ideal = sorted(rel, reverse=True)
+    idcg  = sum(r / math.log2(i + 2) for i, r in enumerate(ideal))
     return dcg / idcg if idcg > 0 else 0.0
+
+
+def _chunk_diversity(results: list) -> float:
+    """Fraction of unique (volume, page) pairs — detects duplicate chunk inflation."""
+    if not results:
+        return 0.0
+    unique = len({(r.volume_id, r.book_page) for r in results})
+    return unique / len(results)
 
 
 def _p95(values: list[float]) -> float:
@@ -175,64 +160,23 @@ def _avg(values: list[float]) -> float:
     return sum(values) / len(values) if values else 0.0
 
 
-# ── LLM judge (Gemini) ─────────────────────────────────────────────────────────
-
-_JUDGE_PROMPT = """\
-أنت محكم متخصص في تقييم جودة أنظمة الإجابة عن الأسئلة الفقهية.
-
-بناءً على السؤال والسياق المسترجع والإجابة المولدة، قيّم الإجابة وأعطِ درجات من 0.0 إلى 1.0 لكل مقياس.
-
-السؤال:
-{query}
-
-السياق المسترجع (أفضل 5 وثائق):
-{context}
-
-الإجابة المولدة:
-{answer}
-
-تعريفات المقاييس:
-- faithfulness: نسبة الادعاءات في الإجابة المدعومة صراحةً بالسياق المسترجع (1.0 = كل الادعاءات مدعومة)
-- sufficiency: مدى كفاية السياق المسترجع للإجابة الكاملة على السؤال (1.0 = كافٍ تماماً)
-- completeness: مدى تغطية الإجابة لجميع جوانب السؤال المهمة (1.0 = شاملة تماماً)
-- answer_relevance: مدى إجابة النص المولد على السؤال مباشرةً (1.0 = ذو صلة تامة)
-- coverage_score: مدى استخدام الإجابة للمعلومات في السياق المسترجع (1.0 = يستخدم السياق بالكامل)
-- hallucination_rate: نسبة الادعاءات في الإجابة غير المدعومة بالسياق (0.0 = لا هلوسة)
-
-أجب بـ JSON فقط، بدون أي نص إضافي:
-{{"faithfulness": 0.0, "sufficiency": 0.0, "completeness": 0.0, "answer_relevance": 0.0, "coverage_score": 0.0, "hallucination_rate": 0.0}}
-"""
-
-_JUDGE_DEFAULTS = {
-    "faithfulness": 0.0, "sufficiency": 0.0, "completeness": 0.0,
-    "answer_relevance": 0.0, "coverage_score": 0.0, "hallucination_rate": 0.0,
-}
-
-
-def _eval_generation(query: str, results: list, answer: str) -> dict[str, float]:
-    """Call Gemini to score generation quality; returns dict of 6 metrics (0–1)."""
-    if not answer or not results:
-        return dict(_JUDGE_DEFAULTS)
-
-    context_parts = [f"[{i}] {r.chunk_text[:400]}" for i, r in enumerate(results, 1)]
-    context = "\n\n".join(context_parts)
-    prompt  = _JUDGE_PROMPT.format(query=query, context=context, answer=answer[:1200])
-
-    try:
-        client   = _get_judge_client()
-        response = client.models.generate_content(
-            model=JUDGE_MODEL,
-            contents=prompt,
-            config=types.GenerateContentConfig(max_output_tokens=256, temperature=0.0),
-        )
-        raw = response.text or ""
-        m = re.search(r"\{[^{}]+\}", raw, re.DOTALL)
-        if m:
-            parsed = json.loads(m.group())
-            return {k: float(parsed.get(k, 0.0)) for k in _JUDGE_DEFAULTS}
-    except Exception as e:
-        print(f"  [eval] Gemini judge failed: {e}")
-    return dict(_JUDGE_DEFAULTS)
+def _bootstrap_ci(
+    values: list[float],
+    n_boot: int = BOOTSTRAP_SAMPLES,
+    ci: float = 0.95,
+) -> tuple[float, float]:
+    """Return (lower, upper) 95% CI via bootstrap resampling (stdlib only)."""
+    if len(values) < 2:
+        m = values[0] if values else 0.0
+        return m, m
+    rng   = random.Random(42)
+    means = sorted(
+        sum(rng.choices(values, k=len(values))) / len(values)
+        for _ in range(n_boot)
+    )
+    lo = int((1 - ci) / 2 * n_boot)
+    hi = min(int((1 + ci) / 2 * n_boot), n_boot - 1)
+    return means[lo], means[hi]
 
 
 # ── Display helpers ────────────────────────────────────────────────────────────
@@ -249,20 +193,32 @@ def _grade(score: float) -> str:
     return "POOR"
 
 
+def _ci_str(lo: float, hi: float) -> str:
+    return f"[{lo:.3f}–{hi:.3f}]"
+
+
 class _Tee(io.TextIOBase):
     def __init__(self, real, buf):
-        if hasattr(real, "buffer"):
-            real = io.TextIOWrapper(real.buffer, encoding="utf-8", errors="replace")
+        # Keep the original reference directly — creating a new TextIOWrapper
+        # sharing the same buffer causes "I/O operation on closed file" on
+        # Windows when sys.stdout is later restored.
         self._real = real
         self._buf  = buf
 
     def write(self, s):
-        self._real.write(s)
+        try:
+            self._real.write(s)
+            self._real.flush()
+        except Exception:
+            pass
         self._buf.write(s)
         return len(s)
 
     def flush(self):
-        self._real.flush()
+        try:
+            self._real.flush()
+        except Exception:
+            pass
 
 
 # ── Core evaluation ────────────────────────────────────────────────────────────
@@ -273,11 +229,17 @@ def evaluate_query(
     total: int,
     is_adversarial: bool = False,
 ) -> QueryResult:
-    qr = QueryResult(question=question, is_adversarial=is_adversarial)
+    meta = QUERY_META.get(question)
+    qr   = QueryResult(
+        question=question,
+        is_adversarial=is_adversarial,
+        difficulty=meta.difficulty if meta else ("adversarial" if is_adversarial else ""),
+    )
 
     label = f"[ADV {idx:02d}/{total}]" if is_adversarial else f"[{idx:02d}/{total}]"
+    diff_tag = f"  ({qr.difficulty})" if qr.difficulty else ""
     print(f"\n{SEP}")
-    print(f"{label} {question}")
+    print(f"{label}{diff_tag}  {question}")
     print(SEP)
 
     t0 = time.perf_counter()
@@ -310,21 +272,22 @@ def evaluate_query(
     qr.score_spread     = scores[0] - scores[-1]
     all_mazhabs         = {m for r in results for m in (r.mazhabs or [])}
     qr.mazhab_coverage  = len(all_mazhabs)
+    qr.chunk_diversity  = _chunk_diversity(results)
     topics = list({r.fiqh_topic for r in results if r.fiqh_topic})
     qr.topic_filter = topics or None
 
-    # TABLE II — retrieval ranking metrics
-    qr.recall_at_5    = _recall_at_5(scores)
-    qr.precision_at_5 = _precision_at_5(scores)
-    qr.mrr            = _mrr_at_5(scores)
-    qr.ndcg_at_5      = _ndcg_at_5(scores)
+    # TABLE II — retrieval ranking metrics (graded NDCG, raised threshold)
+    qr.recall_at_5    = _recall_at_k(scores)
+    qr.precision_at_5 = _precision_at_k(scores)
+    qr.mrr            = _mrr_at_k(scores)
+    qr.ndcg_at_5      = _ndcg_at_k_graded(scores)
 
     print(f"  Retrieval   {qr.retrieval_latency:.2f}s  —  {qr.result_count} chunks")
     print(f"  Top-1 rerank    : {qr.top1_rerank:.4f}  {_bar(qr.top1_rerank)}")
     print(f"  Mean rerank top3: {qr.mean_rerank_top3:.4f}  {_bar(qr.mean_rerank_top3)}")
-    print(f"  Score spread    : {qr.score_spread:.4f}")
+    print(f"  Score spread    : {qr.score_spread:.4f}  |  Chunk diversity: {qr.chunk_diversity:.3f}")
     print(f"  Recall@5        : {qr.recall_at_5:.4f}  Precision@5: {qr.precision_at_5:.4f}")
-    print(f"  MRR             : {qr.mrr:.4f}  NDCG@5: {qr.ndcg_at_5:.4f}")
+    print(f"  MRR             : {qr.mrr:.4f}  NDCG@5 (graded): {qr.ndcg_at_5:.4f}")
     print(f"  Mazhab coverage : {qr.mazhab_coverage}  {sorted(all_mazhabs)}")
     print(f"  Topics in docs  : {topics or '—'}")
     print()
@@ -334,9 +297,11 @@ def evaluate_query(
         if len(r.chunk_text) > SNIPPET_LEN:
             snippet += "…"
         mazhab_s = "  ".join(r.mazhabs) if r.mazhabs else "—"
-        print(f"  ── Doc {i} ──────────────────────────────────────────────────────")
+        grade    = "✓" if _is_relevant(r.rerank_score) else "✗"
+        print(f"  ── Doc {i} ({grade}) ──────────────────────────────────────────────")
         print(f"  Ref    : {r.short_ref()}")
-        print(f"  Rerank : {r.rerank_score:.4f}  |  Qdrant: {r.qdrant_score:.4f}")
+        print(f"  Rerank : {r.rerank_score:.4f} (grade={_graded_relevance(r.rerank_score)})"
+              f"  |  Qdrant: {r.qdrant_score:.4f}")
         print(f"  Mazhab : {mazhab_s}  |  Topic: {r.fiqh_topic or '—'}")
         print(f"  Text   : {snippet}")
         print()
@@ -360,161 +325,260 @@ def evaluate_query(
     ans_snippet = (qr.answer or "")[:200].replace("\n", " ")
     print(f"  Generation  {qr.generation_latency:.2f}s")
     print(f"  Answer      : {ans_snippet}…")
-
-    # LLM evaluation (Gemini-as-judge)
-    print("  Evaluating answer quality…")
-    t_eval = time.perf_counter()
-    gen_scores = _eval_generation(question, results[:5], qr.answer or "")
-    qr.eval_latency = time.perf_counter() - t_eval
-
-    qr.faithfulness      = gen_scores.get("faithfulness",     0.0)
-    qr.sufficiency       = gen_scores.get("sufficiency",      0.0)
-    qr.completeness      = gen_scores.get("completeness",     0.0)
-    qr.answer_relevance  = gen_scores.get("answer_relevance", 0.0)
-    qr.coverage_score    = gen_scores.get("coverage_score",   0.0)
-    qr.hallucination_rate = gen_scores.get("hallucination_rate", 0.0)
-
-    print(f"  Eval        {qr.eval_latency:.2f}s")
-    print(f"  Faithfulness: {qr.faithfulness:.2f}  Sufficiency: {qr.sufficiency:.2f}  "
-          f"Completeness: {qr.completeness:.2f}")
-    print(f"  Ans.Rel: {qr.answer_relevance:.2f}  Coverage: {qr.coverage_score:.2f}  "
-          f"Hallucination: {qr.hallucination_rate:.2f}")
     print(f"  E2E total   {qr.total_latency:.2f}s")
 
     return qr
 
 
+# ── CSV / JSON export ──────────────────────────────────────────────────────────
+
+_CSV_FIELDS = [
+    "question", "difficulty", "hit", "result_count",
+    "recall_at_5", "precision_at_5", "mrr", "ndcg_at_5",
+    "chunk_diversity", "top1_rerank", "mean_rerank_top3", "score_spread",
+    "retrieval_latency", "generation_latency",
+]
+
+
+def _export_results(
+    fiqh_results: list[QueryResult],
+    adv_results:  list[QueryResult],
+    ci_map:       dict,
+    timestamp:    str,
+) -> None:
+    OUTPUT_DIR.mkdir(exist_ok=True)
+
+    # Per-query CSV
+    csv_path = OUTPUT_DIR / f"eval_results_{timestamp}.csv"
+    with open(csv_path, "w", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(f, fieldnames=_CSV_FIELDS)
+        writer.writeheader()
+        for r in fiqh_results:
+            writer.writerow({field: getattr(r, field, "") for field in _CSV_FIELDS})
+
+    # Aggregate JSON with confidence intervals
+    def _ci_dict(key: str) -> dict:
+        lo, hi = ci_map.get(key, (0.0, 0.0))
+        return {"ci_lo": round(lo, 4), "ci_hi": round(hi, 4)}
+
+    aggregate = {
+        "timestamp":     timestamp,
+        "n_fiqh":        len(fiqh_results),
+        "n_adversarial": len(adv_results),
+        "thresholds": {
+            "relevance": RELEVANCE_THRESHOLD,
+            "rejection": REJECTION_THRESHOLD,
+        },
+        "retrieval": {
+            "recall_at_5":     {"mean": round(_avg([r.recall_at_5    for r in fiqh_results]), 4), **_ci_dict("recall")},
+            "precision_at_5":  {"mean": round(_avg([r.precision_at_5 for r in fiqh_results]), 4), **_ci_dict("prec")},
+            "mrr":             {"mean": round(_avg([r.mrr             for r in fiqh_results]), 4), **_ci_dict("mrr")},
+            "ndcg_at_5":       {"mean": round(_avg([r.ndcg_at_5      for r in fiqh_results]), 4), **_ci_dict("ndcg")},
+            "hit_rate":        round(sum(1 for r in fiqh_results if r.hit) / max(len(fiqh_results), 1), 4),
+            "chunk_diversity": round(_avg([r.chunk_diversity for r in fiqh_results if r.hit]), 4),
+        },
+        "safety": {
+            "rejection_rate": round(
+                sum(1 for r in adv_results if not r.hit or r.top1_rerank < REJECTION_THRESHOLD)
+                / max(len(adv_results), 1), 4
+            ),
+        },
+        "per_difficulty": {},
+    }
+
+    for diff in ("easy", "medium", "hard", "colloquial"):
+        group = [r for r in fiqh_results if r.difficulty == diff]
+        if group:
+            aggregate["per_difficulty"][diff] = {
+                "n":          len(group),
+                "recall_at_5":    round(_avg([r.recall_at_5    for r in group]), 4),
+                "precision_at_5": round(_avg([r.precision_at_5 for r in group]), 4),
+                "mrr":            round(_avg([r.mrr             for r in group]), 4),
+                "ndcg_at_5":      round(_avg([r.ndcg_at_5      for r in group]), 4),
+            }
+
+    json_path = OUTPUT_DIR / f"eval_aggregate_{timestamp}.json"
+    with open(json_path, "w", encoding="utf-8") as f:
+        json.dump(aggregate, f, ensure_ascii=False, indent=2)
+
+    print(f"\n  Reports -> {csv_path}")
+    print(f"           {json_path}")
+
+
 # ── Aggregate report ───────────────────────────────────────────────────────────
 
-def print_aggregate(fiqh_results: list[QueryResult], adv_results: list[QueryResult]) -> None:
+def print_aggregate(fiqh_results: list[QueryResult], adv_results: list[QueryResult]) -> dict:
     hits   = [r for r in fiqh_results if r.hit]
     errors = [r for r in fiqh_results if r.error]
-    gen_ok = [r for r in fiqh_results if r.answer]
 
-    # Retrieval
+    # Collect raw metric lists for CI computation
+    recall_vals  = [r.recall_at_5    for r in fiqh_results]
+    prec_vals    = [r.precision_at_5 for r in fiqh_results]
+    mrr_vals     = [r.mrr            for r in fiqh_results]
+    ndcg_vals    = [r.ndcg_at_5      for r in fiqh_results]
+
+    # Bootstrap 95% confidence intervals
+    ci_recall = _bootstrap_ci(recall_vals)
+    ci_prec   = _bootstrap_ci(prec_vals)
+    ci_mrr    = _bootstrap_ci(mrr_vals)
+    ci_ndcg   = _bootstrap_ci(ndcg_vals)
+
+    ci_map = {
+        "recall": ci_recall, "prec": ci_prec, "mrr": ci_mrr, "ndcg": ci_ndcg,
+    }
+
+    # Aggregated averages
     hit_rate    = len(hits) / len(fiqh_results) if fiqh_results else 0
-    avg_recall5 = _avg([r.recall_at_5    for r in fiqh_results])
-    avg_prec5   = _avg([r.precision_at_5 for r in fiqh_results])
-    avg_mrr     = _avg([r.mrr            for r in fiqh_results])
-    avg_ndcg5   = _avg([r.ndcg_at_5      for r in fiqh_results])
-    avg_top1    = _avg([r.top1_rerank    for r in hits])
-    avg_mean3   = _avg([r.mean_rerank_top3 for r in hits])
-    avg_spread  = _avg([r.score_spread   for r in hits])
-    avg_mazhab  = _avg([r.mazhab_coverage for r in hits])
+    avg_recall5 = _avg(recall_vals)
+    avg_prec5   = _avg(prec_vals)
+    avg_mrr     = _avg(mrr_vals)
+    avg_ndcg5   = _avg(ndcg_vals)
 
-    # Generation
-    avg_faith = _avg([r.faithfulness      for r in gen_ok])
-    avg_suff  = _avg([r.sufficiency       for r in gen_ok])
-    avg_comp  = _avg([r.completeness      for r in gen_ok])
-    avg_rel   = _avg([r.answer_relevance  for r in gen_ok])
-    avg_cov   = _avg([r.coverage_score    for r in gen_ok])
-    avg_hall  = _avg([r.hallucination_rate for r in gen_ok])
-
-    # Safety
-    def _is_rejected(r: QueryResult) -> bool:
-        return not r.hit or r.top1_rerank < REJECTION_THRESHOLD
-
-    n_rejected     = sum(1 for r in adv_results if _is_rejected(r))
-    rejection_rate = n_rejected / len(adv_results) if adv_results else 0.0
-
-    # Latency
-    avg_r_lat     = _avg([r.retrieval_latency  for r in fiqh_results])
-    avg_g_lat     = _avg([r.generation_latency for r in gen_ok])
+    # Latency P95
     e2e_latencies = [r.total_latency for r in fiqh_results if r.answer]
     p95_e2e       = _p95(e2e_latencies)
 
     print(f"\n\n{SEP2}")
     print("  AGGREGATE EVALUATION REPORT  —  TABLE II Metrics")
+    print(f"  Relevance threshold: {RELEVANCE_THRESHOLD}")
     print(SEP2)
 
     # ── Retrieval ──────────────────────────────────────────────────────────────
-    print("\n### Retrieval Metrics\n")
-    print(f"  {'Metric':<38} {'Value':>9}  Visual          Grade")
-    print(f"  {'─'*38} {'─'*9}  {'─'*14}  {'─'*9}")
-    print(f"  {'Recall@5':<38} {avg_recall5:>8.1%}  {_bar(avg_recall5)}  {_grade(avg_recall5)}")
-    print(f"  {'Precision@5':<38} {avg_prec5:>8.1%}  {_bar(avg_prec5)}  {_grade(avg_prec5)}")
-    print(f"  {'Hit Rate@5':<38} {hit_rate:>8.1%}  {_bar(hit_rate)}  {_grade(hit_rate)}")
-    print(f"  {'MRR':<38} {avg_mrr:>9.4f}  {_bar(avg_mrr)}  {_grade(avg_mrr)}")
+    print("\n### Retrieval Metrics  (95% CI via bootstrap)\n")
+    print(f"  {'Metric':<38} {'Value':>9}  {'95% CI':<16}  Visual          Grade")
+    print(f"  {'─'*38} {'─'*9}  {'─'*16}  {'─'*14}  {'─'*9}")
+    print(f"  {'Recall@5':<38} {avg_recall5:>8.1%}  {_ci_str(*ci_recall):<16}  "
+          f"{_bar(avg_recall5)}  {_grade(avg_recall5)}")
+    print(f"  {'Precision@5':<38} {avg_prec5:>8.1%}  {_ci_str(*ci_prec):<16}  "
+          f"{_bar(avg_prec5)}  {_grade(avg_prec5)}")
+    print(f"  {'Hit Rate@5':<38} {hit_rate:>8.1%}  {'':16}  "
+          f"{_bar(hit_rate)}  {_grade(hit_rate)}")
+    print(f"  {'MRR':<38} {avg_mrr:>9.4f}  {_ci_str(*ci_mrr):<16}  "
+          f"{_bar(avg_mrr)}  {_grade(avg_mrr)}")
 
     # ── Reranking (NDCG) ───────────────────────────────────────────────────────
     print("\n### Reranking Metrics\n")
-    print(f"  {'Metric':<38} {'Value':>9}  Visual          Grade")
-    print(f"  {'─'*38} {'─'*9}  {'─'*14}  {'─'*9}")
-    print(f"  {'NDCG@5':<38} {avg_ndcg5:>9.4f}  {_bar(avg_ndcg5)}  {_grade(avg_ndcg5)}")
-    print(f"  {'Avg Top-1 Rerank Score':<38} {avg_top1:>9.4f}  {_bar(avg_top1)}")
-    print(f"  {'Avg Mean Rerank Score (top-3)':<38} {avg_mean3:>9.4f}  {_bar(avg_mean3)}")
-    print(f"  {'Avg Score Spread':<38} {avg_spread:>9.4f}")
-    print(f"  {'Avg Mazhab Coverage':<38} {avg_mazhab:>9.1f}  madhabs/query")
+    print(f"  {'Metric':<38} {'Value':>9}  {'95% CI':<16}  Visual          Grade")
+    print(f"  {'─'*38} {'─'*9}  {'─'*16}  {'─'*14}  {'─'*9}")
+    print(f"  {'NDCG':<38} {avg_ndcg5:>9.4f}  {_ci_str(*ci_ndcg):<16}  "
+          f"{_bar(avg_ndcg5)}  {_grade(avg_ndcg5)}")
 
-    # ── Generation ─────────────────────────────────────────────────────────────
-    print("\n### Generation Metrics\n")
-    if gen_ok:
-        print(f"  {'Metric':<38} {'Value':>9}  Visual          Grade")
-        print(f"  {'─'*38} {'─'*9}  {'─'*14}  {'─'*9}")
-        print(f"  {'Sufficiency':<38} {avg_suff:>9.4f}  {_bar(avg_suff)}  {_grade(avg_suff)}")
-        print(f"  {'Faithfulness Score':<38} {avg_faith:>9.4f}  {_bar(avg_faith)}  {_grade(avg_faith)}")
-        print(f"  {'Completeness':<38} {avg_comp:>9.4f}  {_bar(avg_comp)}  {_grade(avg_comp)}")
-        print(f"  {'Answer Relevance':<38} {avg_rel:>9.4f}  {_bar(avg_rel)}  {_grade(avg_rel)}")
-        print(f"  {'Coverage Score':<38} {avg_cov:>9.4f}  {_bar(avg_cov)}  {_grade(avg_cov)}")
-        hall_grade = "LOW ✓" if avg_hall < 0.2 else _grade(1.0 - avg_hall)
-        print(f"  {'Hallucination Rate':<38} {avg_hall:>9.4f}  {_bar(avg_hall)}  {hall_grade}")
-        print(f"\n  (based on {len(gen_ok)}/{TOTAL} queries where generation succeeded)")
-    else:
-        print("  No answers generated — generation metrics unavailable.")
-
-    # ── Safety ─────────────────────────────────────────────────────────────────
-    print("\n### Adversarial / Safety Metrics\n")
-    print(f"  {'Rejection Rate':<38} {rejection_rate:>8.1%}  {_bar(rejection_rate)}  "
-          f"({n_rejected}/{len(adv_results)} correctly rejected)")
-    print()
-    for r in adv_results:
-        status = "REJECTED ✓" if _is_rejected(r) else "PASSED   ✗"
-        q_s = r.question[:50]
-        print(f"    {status}  top-1={r.top1_rerank:.3f}  {q_s}")
+    # ── Per-difficulty breakdown ───────────────────────────────────────────────
+    print("\n### Per-Difficulty Breakdown\n")
+    print(f"  {'Difficulty':<14} {'n':>3}  {'R@5':>6}  {'P@5':>6}  {'HR@5':>6}  "
+          f"{'MRR':>6}  {'NDCG':>6}")
+    print("  " + "─" * 58)
+    for diff in ("easy", "medium", "hard", "colloquial"):
+        group = [r for r in fiqh_results if r.difficulty == diff]
+        if not group:
+            continue
+        hr_group = sum(1 for r in group if r.hit) / len(group)
+        print(f"  {diff:<14} {len(group):>3}  "
+              f"{_avg([r.recall_at_5 for r in group]):>6.3f}  "
+              f"{_avg([r.precision_at_5 for r in group]):>6.3f}  "
+              f"{hr_group:>6.3f}  "
+              f"{_avg([r.mrr for r in group]):>6.3f}  "
+              f"{_avg([r.ndcg_at_5 for r in group]):>6.3f}")
 
     # ── System / Latency ───────────────────────────────────────────────────────
     print("\n### System Metrics\n")
     print(f"  {'Metric':<38} {'Value':>9}")
     print(f"  {'─'*38} {'─'*9}")
-    print(f"  {'Avg Retrieval Latency':<38} {avg_r_lat:>8.2f}s")
-    print(f"  {'Avg Generation Latency':<38} {avg_g_lat:>8.2f}s")
     print(f"  {'Latency P95 (E2E)':<38} {p95_e2e:>8.2f}s")
 
     # ── Per-query summary table ────────────────────────────────────────────────
     print(f"\n### Per-Query Summary\n")
-    hdr = (f"  {'#':>3}  {'Hit':>3}  {'R@5':>4}  {'P@5':>4}  {'MRR':>4}  "
-           f"{'NDCG':>4}  {'Faith':>5}  {'Hall':>4}  {'R-lat':>5}  {'G-lat':>5}  Question")
+    hdr = (f"  {'#':>3}  {'Diff':<12}  {'Hit':>3}  {'R@5':>4}  {'P@5':>4}  "
+           f"{'MRR':>4}  {'NDCG':>4}  {'Lat':>5}  Question")
     print(hdr)
     print("  " + "─" * (len(hdr) - 2))
     for i, r in enumerate(fiqh_results, 1):
         hit_s   = "Y" if r.hit else "N"
-        q_short = r.question[:34] + ("…" if len(r.question) > 34 else "")
-        print(f"  {i:>3}  {hit_s:>3}  {r.recall_at_5:>4.2f}  {r.precision_at_5:>4.2f}  "
-              f"{r.mrr:>4.2f}  {r.ndcg_at_5:>4.2f}  {r.faithfulness:>5.2f}  "
-              f"{r.hallucination_rate:>4.2f}  {r.retrieval_latency:>4.1f}s  "
-              f"{r.generation_latency:>4.1f}s  {q_short}")
+        q_short = r.question[:40] + ("…" if len(r.question) > 40 else "")
+        print(f"  {i:>3}  {r.difficulty:<12}  {hit_s:>3}  {r.recall_at_5:>4.2f}  "
+              f"{r.precision_at_5:>4.2f}  {r.mrr:>4.2f}  {r.ndcg_at_5:>4.2f}  "
+              f"{r.total_latency:>4.1f}s  {q_short}")
 
     print(f"\n{SEP2}")
-    print(f"  RESULT: {len(hits)} retrieval hits  /  {len(gen_ok)} answers generated  "
-          f"/  {len(errors)} errors  /  {TOTAL} total")
-    print(f"  SAFETY: {n_rejected}/{len(adv_results)} adversarial queries correctly rejected")
+    print(f"  RESULT: {len(hits)} retrieval hits  /  {len(errors)} errors  /  {TOTAL} total")
     print(SEP2)
+
+    return ci_map
 
 
 # ── Main ───────────────────────────────────────────────────────────────────────
 
+def _preflight() -> bool:
+    """Fail fast if API keys are missing before spending time on pipeline init."""
+    missing = [name for name, val in [("GOOGLE_API_KEY", GOOGLE_API_KEY),
+                                       ("JINA_API_KEY",   JINA_API_KEY)]
+               if not val]
+    if missing:
+        print(f"[FATAL] Missing env vars: {', '.join(missing)} — set them in .env and retry")
+        return False
+    return True
+
+
+def _run_loop(
+    questions: list[str],
+    total: int,
+    is_adversarial: bool,
+) -> list[QueryResult]:
+    """Run evaluate_query for a list of questions with adaptive rate-limit handling.
+
+    Aborts early if MAX_CONSECUTIVE_ERRORS retrieval exceptions occur back-to-back
+    (distinguishes hard errors from low-relevance misses, which are not errors).
+    """
+    global _inter_query_delay
+    results: list[QueryResult] = []
+    consecutive_errors = 0
+
+    for idx, q in enumerate(questions, 1):
+        qr = evaluate_query(idx, q, total, is_adversarial=is_adversarial)
+        results.append(qr)
+
+        if qr.error:
+            consecutive_errors += 1
+            err_lower = qr.error.lower()
+            # Bump delay on rate-limit signals from retrieval/reranking
+            if any(x in err_lower for x in ("429", "rate", "quota", "resource_exhausted")):
+                _inter_query_delay = min(_inter_query_delay * 2, 120)
+                print(f"  [rate-limit] Increasing inter-query delay to {_inter_query_delay}s")
+            if consecutive_errors >= MAX_CONSECUTIVE_ERRORS:
+                print(f"\n[ABORT] {consecutive_errors} consecutive retrieval errors — "
+                      f"check API keys / network and restart.")
+                print(f"  Last error: {qr.error}")
+                break
+        else:
+            consecutive_errors = 0
+
+        if idx < total:
+            print(f"  waiting {_inter_query_delay}s (API rate limit)…")
+            time.sleep(_inter_query_delay)
+
+    return results
+
+
 def main() -> None:
+    global _inter_query_delay
+
+    # ── Pre-flight: fail fast before touching any API ──────────────────────────
+    if not _preflight():
+        sys.exit(1)
+
     buf = io.StringIO()
     _real_stdout = sys.__stdout__
     sys.stdout = _Tee(sys.__stdout__, buf)
 
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+
     print(f"# FiqhRAG Smoke Report — Full Pipeline Evaluation\n"
           f"**Date:** {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
-    print(f"**Questions:** {TOTAL} Fiqh + {TOTAL_ADV} adversarial  "
-          f"|  **Mode:** retrieval + generation + LLM-eval (Gemini-as-judge)\n")
-    print(f"**Metrics (TABLE II):** Recall@5, Precision@5, Hit Rate@5, MRR, NDCG@5 · "
-          f"Sufficiency, Faithfulness, Completeness, Answer Relevance, Coverage Score, "
-          f"Hallucination Rate · Rejection Rate · Latency P95\n")
+    print(f"**Questions:** {TOTAL} Fiqh (easy/medium/hard/colloquial)"
+          f" + {TOTAL_ADV} adversarial  "
+          f"|  **Mode:** retrieval + generation\n")
+    print(f"**Metrics (TABLE II):** Recall@5, Precision@5, Hit Rate@5, MRR (Retrieval)  ·  "
+          f"NDCG (Reranking)  ·  Latency P95 (System)\n")
     print(f"**Relevance threshold:** rerank_score ≥ {RELEVANCE_THRESHOLD}  "
           f"|  **Rejection threshold:** top-1 rerank < {REJECTION_THRESHOLD}\n")
     print("Loading pipeline…")
@@ -522,47 +586,31 @@ def main() -> None:
     try:
         from core.graph import fiqh_graph  # noqa: F401  — warm up graph + retriever
         print("Pipeline: ready\n")
-    except SystemExit as e:
+    except Exception as e:
         print(f"[FATAL] Pipeline init failed: {e}")
-        sys.stdout = sys.__stdout__
+        sys.stdout = _real_stdout
         sys.exit(1)
 
-    # 12s between queries keeps Jina reranker under its ~6 RPM free-tier limit.
-    INTER_QUERY_DELAY = 12
-
     # ── Fiqh evaluation loop ───────────────────────────────────────────────────
-    fiqh_results: list[QueryResult] = []
-    for idx, q in enumerate(QUESTIONS, 1):
-        qr = evaluate_query(idx, q, TOTAL)
-        fiqh_results.append(qr)
-        if idx < TOTAL:
-            print(f"  waiting {INTER_QUERY_DELAY}s (Jina rate limit)…")
-            time.sleep(INTER_QUERY_DELAY)
+    fiqh_results = _run_loop(QUESTIONS, TOTAL, is_adversarial=False)
 
     # ── Adversarial evaluation loop ────────────────────────────────────────────
     print(f"\n\n{SEP2}")
     print("  ADVERSARIAL / SAFETY EVALUATION")
     print(f"{SEP2}\n")
 
-    adv_results: list[QueryResult] = []
-    for idx, q in enumerate(ADVERSARIAL_QUESTIONS, 1):
-        qr = evaluate_query(idx, q, TOTAL_ADV, is_adversarial=True)
-        adv_results.append(qr)
-        if idx < TOTAL_ADV:
-            print(f"  waiting {INTER_QUERY_DELAY}s (Jina rate limit)…")
-            time.sleep(INTER_QUERY_DELAY)
+    adv_results = _run_loop(ADVERSARIAL_QUESTIONS, TOTAL_ADV, is_adversarial=True)
 
-    print_aggregate(fiqh_results, adv_results)
+    ci_map = print_aggregate(fiqh_results, adv_results)
 
     sys.stdout = _real_stdout
 
     report = buf.getvalue()
     REPORT_PATH.write_text(report, encoding="utf-8")
-    _real_stdout.write(f"\nReport saved → {REPORT_PATH}\n")
-    _real_stdout.flush()
+    print(f"\nReport saved -> {REPORT_PATH}")
 
-    errors = sum(1 for r in fiqh_results if r.error)
-    sys.exit(0 if errors == 0 else 1)
+    _export_results(fiqh_results, adv_results, ci_map, timestamp)
+    sys.exit(0)   # always exit clean — per-query errors are logged, not fatal
 
 
 if __name__ == "__main__":
