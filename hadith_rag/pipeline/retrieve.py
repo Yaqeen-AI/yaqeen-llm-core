@@ -48,6 +48,7 @@ class RetrievedHadith:
     subcategory_name: str = ""
     hadith_tag: str = ""
     has_explanation: bool = False
+    explanation: str = ""
     canonical_group_id: str = ""
 
     @property
@@ -109,7 +110,9 @@ class HadithRetriever:
         logger.info(f"Connecting to Qdrant at: {settings.QDRANT_URL}")
         self.client = QdrantClient(
             url=settings.QDRANT_URL,
+            api_key=settings.QDRANT_API_KEY or None,
             timeout=settings.QDRANT_TIMEOUT_SECONDS,
+            check_compatibility=False,
         )
 
         try:
@@ -189,6 +192,7 @@ class HadithRetriever:
             subcategory_name=str(payload.get("subcategory_name", "") or ""),
             hadith_tag=str(payload.get("hadith_tag", "") or ""),
             has_explanation=HadithRetriever._payload_bool(payload, "hasExplanation"),
+            explanation=str(payload.get("explanation", "") or ""),
             canonical_group_id=str(payload.get("canonical_group_id", "") or ""),
         )
 
@@ -220,12 +224,14 @@ class HadithRetriever:
         """
         top_k = top_k or settings.RETRIEVAL_TOP_K
 
+        vector_db_type = getattr(self, "vector_db_type", "chroma")
+
         logger.info(
-            f"Querying {self.vector_db_type}: top_k={top_k}, "
+            f"Querying {vector_db_type}: top_k={top_k}, "
             f"grade_filter={grade_filter}, masdar_filter={masdar_filter}"
         )
 
-        if self.vector_db_type == "qdrant":
+        if vector_db_type == "qdrant":
             return self._retrieve_qdrant(
                 query_embedding, top_k, grade_filter, masdar_filter
             )
@@ -316,6 +322,7 @@ class HadithRetriever:
                     hadith_tag=metadata.get("hadith_tag", ""),
                     has_explanation=str(metadata.get("hasExplanation", "False")).lower()
                     == "true",
+                    explanation=str(metadata.get("explanation", "") or ""),
                     canonical_group_id=metadata.get("canonical_group_id", ""),
                 )
                 hadiths.append(hadith)
@@ -406,11 +413,36 @@ class HadithRetriever:
 
         for offset in range(0, len(ids), batch_size):
             batch_ids = ids[offset : offset + batch_size]
+            missing_ids = list(batch_ids)
+
+            try:
+                points = self.client.retrieve(
+                    collection_name=self.collection_name,
+                    ids=batch_ids,
+                    with_payload=True,
+                    with_vectors=False,
+                )
+                for point in points:
+                    hadith = self._hadith_from_payload(
+                        point.payload or {},
+                        fallback_id=point.id,
+                    )
+                    found[hadith.id] = hadith
+
+                missing_ids = [doc_id for doc_id in batch_ids if doc_id not in found]
+                if not missing_ids:
+                    continue
+            except Exception as exc:
+                logger.debug(
+                    "Direct Qdrant ID fetch failed; falling back to payload scroll: %s",
+                    exc,
+                )
+
             query_filter = Filter(
                 must=[
                     FieldCondition(
                         key="hadith_id",
-                        match=MatchAny(any=batch_ids),
+                        match=MatchAny(any=missing_ids),
                     )
                 ]
             )
@@ -419,7 +451,7 @@ class HadithRetriever:
                 points, next_page = self.client.scroll(
                     collection_name=self.collection_name,
                     scroll_filter=query_filter,
-                    limit=min(len(batch_ids), 256),
+                    limit=min(len(missing_ids), 256),
                     offset=next_page,
                     with_payload=True,
                     with_vectors=False,
@@ -468,6 +500,7 @@ class HadithRetriever:
                 hadith_tag=metadata.get("hadith_tag", ""),
                 has_explanation=str(metadata.get("hasExplanation", "False")).lower()
                 == "true",
+                explanation=str(metadata.get("explanation", "") or ""),
                 canonical_group_id=metadata.get("canonical_group_id", ""),
             )
         return found

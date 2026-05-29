@@ -17,6 +17,7 @@
 #   - Metadata-focused generation for metadata queries
 
 import logging
+import copy
 import re
 import time
 from collections import OrderedDict
@@ -289,6 +290,9 @@ class HadithRAGPipeline:
         self._embedding_cache = self.hybrid_retriever.embedding_cache
         self._response_cache: OrderedDict[tuple, GeneratedResponse] = OrderedDict()
         self._response_cache_size = max(0, settings.RESPONSE_CACHE_SIZE)
+        self._retrieval_cache: OrderedDict[tuple, tuple[float, HybridResult]] = OrderedDict()
+        self._retrieval_cache_size = max(0, settings.RETRIEVAL_CACHE_SIZE)
+        self._retrieval_cache_ttl_seconds = max(1, settings.RETRIEVAL_CACHE_TTL_SECONDS)
 
         logger.info("✅ Hadith RAG Pipeline initialized successfully")
 
@@ -327,6 +331,111 @@ class HadithRAGPipeline:
         self._response_cache.move_to_end(key)
         while len(self._response_cache) > self._response_cache_size:
             self._response_cache.popitem(last=False)
+
+    def _build_retrieval_cache_key(
+        self,
+        processed,
+        grade_filter: Optional[str | list[str]],
+        masdar_filter: Optional[str | list[str]],
+        retrieval_top_k: int,
+        retrieval_mode: str,
+        enable_dedup: bool = True,
+    ) -> tuple:
+        if isinstance(grade_filter, list):
+            grade_key = tuple(grade_filter)
+        else:
+            grade_key = grade_filter
+
+        if isinstance(masdar_filter, list):
+            masdar_key = tuple(masdar_filter)
+        else:
+            masdar_key = masdar_filter
+
+        return (
+            processed.query_type.value,
+            str(getattr(processed, "normalized", "")).strip(),
+            str(getattr(processed, "dense_query", "")).strip(),
+            str(getattr(processed, "sparse_query", "")).strip(),
+            tuple(getattr(processed, "multi_queries", []) or []),
+            grade_key,
+            masdar_key,
+            int(retrieval_top_k),
+            retrieval_mode,
+            bool(enable_dedup),
+            settings.DENSE_TOP_K,
+            settings.SPARSE_TOP_K,
+            settings.RRF_K,
+        )
+
+    def _get_cached_retrieval(self, key: tuple) -> HybridResult | None:
+        if self._retrieval_cache_size <= 0:
+            return None
+
+        cached = self._retrieval_cache.get(key)
+        if cached is None:
+            return None
+
+        expires_at, result = cached
+        if expires_at <= time.monotonic():
+            del self._retrieval_cache[key]
+            return None
+
+        self._retrieval_cache.move_to_end(key)
+        result_copy = copy.deepcopy(result)
+        result_copy.timing = {
+            **result_copy.timing,
+            "cache_hit": 1.0,
+            "total": 0.0,
+        }
+        return result_copy
+
+    def _cache_retrieval(self, key: tuple, result: HybridResult) -> None:
+        if self._retrieval_cache_size <= 0:
+            return
+
+        self._retrieval_cache[key] = (
+            time.monotonic() + self._retrieval_cache_ttl_seconds,
+            copy.deepcopy(result),
+        )
+        self._retrieval_cache.move_to_end(key)
+        while len(self._retrieval_cache) > self._retrieval_cache_size:
+            self._retrieval_cache.popitem(last=False)
+
+    def _retrieve_with_cache(
+        self,
+        *,
+        user_query: str,
+        processed,
+        retrieval_top_k: int,
+        grade_filter: Optional[str | list[str]],
+        masdar_filter: Optional[str | list[str]],
+        retrieval_mode: str,
+        query_embedding: Optional[list[float]] = None,
+    ) -> HybridResult:
+        cache_key = self._build_retrieval_cache_key(
+            processed=processed,
+            grade_filter=grade_filter,
+            masdar_filter=masdar_filter,
+            retrieval_top_k=retrieval_top_k,
+            retrieval_mode=retrieval_mode,
+        )
+
+        cached = self._get_cached_retrieval(cache_key)
+        if cached is not None:
+            return cached
+
+        result = self.hybrid_retriever.retrieve(
+            query=user_query,
+            fused_top_k=retrieval_top_k,
+            grade_filter=grade_filter,
+            masdar_filter=masdar_filter,
+            retrieval_mode=retrieval_mode,  # type: ignore[arg-type]
+            processed_query=processed,
+            query_embedding=query_embedding,
+        )
+        result.timing["cache_hit"] = 0.0
+        self._cache_retrieval(cache_key, result)
+        return result
 
     def query(
         self,
@@ -416,9 +525,11 @@ class HadithRAGPipeline:
         t0 = time.time()
         logger.info(f"Stages 1-3: Hybrid retrieval for: '{user_query[:80]}...'")
 
-        hybrid_result = self.hybrid_retriever.retrieve(
-            query=user_query,
-            fused_top_k=retrieval_top_k or settings.RETRIEVAL_TOP_K,
+        retrieval_limit = retrieval_top_k or settings.RETRIEVAL_TOP_K
+        hybrid_result = self._retrieve_with_cache(
+            user_query=user_query,
+            processed=processed,
+            retrieval_top_k=retrieval_limit,
             grade_filter=grade_filter,
             masdar_filter=masdar_filter,
             retrieval_mode=retrieval_mode,
@@ -427,18 +538,20 @@ class HadithRAGPipeline:
 
         if not masdar_filter and not any(_is_primary_source(hadith) for hadith in retrieved_hadiths):
             try:
-                primary_result = self.hybrid_retriever.retrieve(
-                    query=user_query,
-                    fused_top_k=max(retrieval_top_k or settings.RETRIEVAL_TOP_K, settings.RERANK_TOP_K * 2),
+                primary_result = self._retrieve_with_cache(
+                    user_query=user_query,
+                    processed=processed,
+                    retrieval_top_k=max(retrieval_limit, settings.RERANK_TOP_K * 2),
                     grade_filter=grade_filter,
                     masdar_filter=list(_PRIMARY_SOURCE_BOOKS),
                     retrieval_mode=retrieval_mode,
+                    query_embedding=hybrid_result.query_embedding,
                 )
                 if primary_result.hadiths:
                     retrieved_hadiths = _merge_with_primary_candidates(
                         base_hadiths=retrieved_hadiths,
                         primary_hadiths=primary_result.hadiths,
-                        limit=retrieval_top_k or settings.RETRIEVAL_TOP_K,
+                        limit=retrieval_limit,
                     )
                     logger.info(
                         f"Primary-source injection added {len(primary_result.hadiths)} "

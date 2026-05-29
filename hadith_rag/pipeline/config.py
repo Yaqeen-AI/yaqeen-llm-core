@@ -24,6 +24,7 @@ class Settings:
     # --- Vector DB: Qdrant (migrated from ChromaDB) ---
     VECTOR_DB_TYPE: str = os.getenv("VECTOR_DB_TYPE", "qdrant")  # 'qdrant' or 'chroma'
     QDRANT_URL: str = os.getenv("QDRANT_URL", "http://localhost:6333")
+    QDRANT_API_KEY: str = os.getenv("QDRANT_API_KEY", "")
     QDRANT_COLLECTION_NAME: str = os.getenv("QDRANT_COLLECTION_NAME", "hadiths")
     QDRANT_TIMEOUT_SECONDS: int = int(os.getenv("QDRANT_TIMEOUT_SECONDS", "30"))
     
@@ -67,13 +68,15 @@ class Settings:
     TFIDF_MAX_FEATURES: int = int(os.getenv("TFIDF_MAX_FEATURES", "300000"))
 
     # --- Hybrid Retrieval ---
-    DENSE_TOP_K: int = int(os.getenv("DENSE_TOP_K", "30"))
-    SPARSE_TOP_K: int = int(os.getenv("SPARSE_TOP_K", "30"))
+    DENSE_TOP_K: int = int(os.getenv("DENSE_TOP_K", "20"))
+    SPARSE_TOP_K: int = int(os.getenv("SPARSE_TOP_K", "20"))
     RRF_K: int = int(os.getenv("RRF_K", "60"))
 
     # --- Caching ---
     EMBEDDING_CACHE_SIZE: int = int(os.getenv("EMBEDDING_CACHE_SIZE", "1000"))
     EMBEDDING_CACHE_TTL_SECONDS: int = int(os.getenv("EMBEDDING_CACHE_TTL_SECONDS", "900"))
+    RETRIEVAL_CACHE_SIZE: int = int(os.getenv("RETRIEVAL_CACHE_SIZE", "256"))
+    RETRIEVAL_CACHE_TTL_SECONDS: int = int(os.getenv("RETRIEVAL_CACHE_TTL_SECONDS", "300"))
 
     # --- Gemini --- FREE
     GEMINI_API_KEY: str = os.getenv("GEMINI_API_KEY", "")

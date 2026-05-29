@@ -1421,7 +1421,19 @@ def _deduplicate_hadiths_for_answer(hadiths: list[RetrievedHadith]) -> list[Retr
     return unique
 
 
-def _format_hadith_block(index: int, hadith: RetrievedHadith, metadata_first: bool = False) -> str:
+def _format_explanation_for_context(explanation: str, limit: int = 1800) -> str:
+    explanation = re.sub(r"\s+", " ", str(explanation or "")).strip()
+    if len(explanation) <= limit:
+        return explanation
+    return explanation[:limit].rstrip() + "..."
+
+
+def _format_hadith_block(
+    index: int,
+    hadith: RetrievedHadith,
+    metadata_first: bool = False,
+    include_explanation: bool = False,
+) -> str:
     args            = _grade_args(hadith)
     canonical_grade = _cached_resolve_grade_bucket(*args)
     grade_label     = _cached_resolve_grade_label(*args)
@@ -1446,6 +1458,7 @@ def _format_hadith_block(index: int, hadith: RetrievedHadith, metadata_first: bo
             line("الرقم/الصفحة", hadith.safha_raqam),
             line("التصنيف", hadith.category),
             line("التصنيف الفرعي", hadith.subcategory_name),
+            line("الشرح", _format_explanation_for_context(hadith.explanation) if include_explanation else ""),
         ])
     else:
         body = join_lines([
@@ -1458,6 +1471,7 @@ def _format_hadith_block(index: int, hadith: RetrievedHadith, metadata_first: bo
             line("الرقم/الصفحة", hadith.safha_raqam),
             line("التصنيف", hadith.category),
             line("التصنيف الفرعي", hadith.subcategory_name),
+            line("الشرح", _format_explanation_for_context(hadith.explanation) if include_explanation else ""),
         ])
 
     return (
@@ -1478,6 +1492,7 @@ def _group_hadiths_by_grade(hadiths: list[RetrievedHadith]) -> dict[str, list[Re
 def _format_grouped_sections(
     sections: list[tuple[str, list[RetrievedHadith]]],
     metadata_first: bool = False,
+    include_explanation: bool = False,
 ) -> str:
     rendered_sections = []
     current_index = 1
@@ -1487,7 +1502,14 @@ def _format_grouped_sections(
         rendered_sections.append(title)
         blocks = []
         for hadith in section_hadiths:
-            blocks.append(_format_hadith_block(current_index, hadith, metadata_first=metadata_first))
+            blocks.append(
+                _format_hadith_block(
+                    current_index,
+                    hadith,
+                    metadata_first=metadata_first,
+                    include_explanation=include_explanation,
+                )
+            )
             current_index += 1
         rendered_sections.append("\n\n".join(blocks))
     return "\n\n".join(rendered_sections)
@@ -1600,7 +1622,7 @@ def _format_hadith_context(hadiths: list[RetrievedHadith], answer_intent: Answer
             sections.append(("### تنبيه: لا يوجد في النتائج حديث صحيح أو حسن يمكن الاستدلال به مباشرة", []))
         if non_evidence:
             sections.append(("### روايات غير صالحة للاحتجاج (ضعيف أو موضوع أو غير متحقق)", non_evidence))
-        return _format_grouped_sections(sections)
+        return _format_grouped_sections(sections, include_explanation=True)
 
     if answer_intent == AnswerIntent.COLLECTION:
         groups   = _group_hadiths_by_grade(hadiths)
@@ -1729,6 +1751,9 @@ def _wrap_audited_answer(
 
 
 def _derive_conservative_explanation(hadith: RetrievedHadith) -> str | None:
+    if hadith.explanation:
+        return str(hadith.explanation).strip()
+
     matn_norm = _normalize_hadith_text_for_dedup(hadith.text_ar)
 
     if (

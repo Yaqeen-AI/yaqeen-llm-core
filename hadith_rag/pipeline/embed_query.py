@@ -36,6 +36,7 @@ class JinaQueryEmbedder:
         self.model = model or settings.JINA_EMBEDDING_MODEL
         self.dimensions = dimensions or settings.JINA_EMBEDDING_DIM
         self.api_url = settings.JINA_API_URL
+        self._client = httpx.Client(timeout=30.0)
 
         if not self.api_key:
             raise ValueError(
@@ -75,9 +76,8 @@ class JinaQueryEmbedder:
             f"task=retrieval.query, dims={self.dimensions}"
         )
 
-        with httpx.Client(timeout=30.0) as client:
-            response = client.post(self.api_url, headers=headers, json=payload)
-            response.raise_for_status()
+        response = self._client.post(self.api_url, headers=headers, json=payload)
+        response.raise_for_status()
 
         data = response.json()
 
@@ -118,9 +118,13 @@ class JinaQueryEmbedder:
             "input": queries,
         }
 
-        with httpx.Client(timeout=60.0) as client:
-            response = client.post(self.api_url, headers=headers, json=payload)
-            response.raise_for_status()
+        response = self._client.post(
+            self.api_url,
+            headers=headers,
+            json=payload,
+            timeout=60.0,
+        )
+        response.raise_for_status()
 
         data = response.json()
 
@@ -149,6 +153,10 @@ class JinaQueryEmbedder:
         logger.info(f"Batch embedded {len(embeddings)} queries")
 
         return embeddings
+
+    def close(self) -> None:
+        """Close the persistent HTTP client."""
+        self._client.close()
 
 
 # Module-level convenience instance

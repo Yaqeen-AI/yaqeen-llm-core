@@ -80,6 +80,7 @@ class HadithResponse(BaseModel):
     category: str = ""
     subcategory_name: str = ""
     has_explanation: bool = False
+    explanation: str = ""
 
 
 class CitationResponse(BaseModel):
@@ -177,6 +178,10 @@ async def lifespan(app: FastAPI):
     yield
     
     logger.info("🛑 Shutting down YaqeenAI Hadith RAG API...")
+    if _pipeline and _pipeline.hybrid_retriever.embedder:
+        close = getattr(_pipeline.hybrid_retriever.embedder, "close", None)
+        if callable(close):
+            close()
 
 
 # ============================================================
@@ -335,6 +340,7 @@ async def query_hadith(request: QueryRequest):
                 category=h.category,
                 subcategory_name=h.subcategory_name,
                 has_explanation=h.has_explanation,
+                explanation=h.explanation,
             )
             for h in result.reranked_hadiths
         ]
@@ -450,6 +456,7 @@ async def search_hadiths(request: SearchRequest):
                 category=h.category,
                 subcategory_name=h.subcategory_name,
                 has_explanation=h.has_explanation,
+                explanation=h.explanation,
             )
             for h in reranked
         ]
