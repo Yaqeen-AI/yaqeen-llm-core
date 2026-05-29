@@ -15,6 +15,7 @@ import re
 from pathlib import Path
 from typing import Optional
 
+import numpy as np
 from rank_bm25 import BM25Okapi
 
 logger = logging.getLogger(__name__)
@@ -120,9 +121,15 @@ class BM25Service:
             return []
         
         scores = self._index.get_scores(query_tokens)
-        
-        # Get top-k indices
-        top_indices = sorted(range(len(scores)), key=lambda i: scores[i], reverse=True)[:top_k]
+
+        if top_k <= 0:
+            return []
+
+        if top_k >= len(scores):
+            top_indices = np.argsort(scores)[::-1]
+        else:
+            top_indices = np.argpartition(scores, -top_k)[-top_k:]
+            top_indices = top_indices[np.argsort(scores[top_indices])[::-1]]
         
         results = [
             (self._doc_ids[idx], float(scores[idx]))
