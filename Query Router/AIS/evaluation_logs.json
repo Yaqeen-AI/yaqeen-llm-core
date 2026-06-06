@@ -259,5 +259,33 @@
       }
     ],
     "final_answer": "[Dummy LLM] I'm currently running without a real language model. Please install torch and transformers for full functionality."
+  },
+  {
+    "timestamp": "2026-06-07T02:28:41.511217",
+    "antigen_query": "hello",
+    "cache_hit": false,
+    "sub_queries": [
+      "hello"
+    ],
+    "clones_count": 0,
+    "matured_sub_queries": [],
+    "secondary_context_count": 0,
+    "suppressed_context_count": 0,
+    "suppressed_context_metadata": [],
+    "final_answer": "[1] [Source: Direct Answer]\nThis is a general conversational query or greeting. Respond politely and directly to the user as Yaqeen, an Islamic knowledge assistant."
+  },
+  {
+    "timestamp": "2026-06-07T02:29:43.853775",
+    "antigen_query": "hello",
+    "cache_hit": false,
+    "sub_queries": [
+      "hello"
+    ],
+    "clones_count": 0,
+    "matured_sub_queries": [],
+    "secondary_context_count": 0,
+    "suppressed_context_count": 0,
+    "suppressed_context_metadata": [],
+    "final_answer": "[1] [Source: Direct Answer]\nThis is a general conversational query or greeting. Respond politely and directly to the user as Yaqeen, an Islamic knowledge assistant."
   }
 ]

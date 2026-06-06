@@ -1,107 +1,147 @@
 """
-Parallel multi-agent dispatcher with per-sub-query routing.
+AIS Dispatcher (Innate Response - Antibody Generation).
 
-Reads the `sub_query_agents` map from state and executes the matching
-worker agents in parallel via ThreadPoolExecutor.  Each agent receives
-the specific sub-query it was routed for (not the full compound question).
-
-Falls back to the original behavior (whole question → selected_agents)
-when no sub-query decomposition was performed.
+Dispatches sub-queries to workers in parallel using async/await.
+Aggregates initial context chunks (antibodies) into a single, unified context array.
 """
 
-from concurrent.futures import ThreadPoolExecutor, as_completed
+import asyncio
+import logging
+import re
+from typing import Dict, List, Set
+from langchain_core.documents import Document
 from state import AgentState
+
+# Import synchronous worker nodes
 from workers.quran_agent import quran_agent_node
 from workers.hadith_agent import hadith_agent_node
 from workers.fiqh_agent import fiqh_agent_node
 from workers.direct_answer import direct_answer_node
 
-AGENT_MAP = {
+logger = logging.getLogger("ais.dispatcher")
+
+# Worker registry
+WORKER_MAP = {
     "quran_agent": quran_agent_node,
     "hadith_agent": hadith_agent_node,
     "fiqh_agent": fiqh_agent_node,
     "direct_answer": direct_answer_node,
 }
 
+# Heuristic keywords for routing
+QURAN_KEYWORDS = {
+    "quran", "quranic", "ayah", "ayat", "surah", "sura", "verse", "verses",
+    "tafsir", "revelation", "juz", "hizb", "makkah", "madinah", "recitation",
+    "قرآن", "قرآنية", "قرآني", "آية", "آيات", "سورة", "سور",
+    "تفسير", "وحي", "تلاوة", "مصحف", "جزء",
+}
 
-def _dispatch_single(fn, state: dict, sub_query: str, agent_name: str) -> list:
-    """Run one agent with the question overridden to the sub-query text."""
-    modified_state = {**state, "question": sub_query}
-    result = fn(modified_state)
-    docs = result.get("retrieved_context", [])
+HADITH_KEYWORDS = {
+    "hadith", "hadiths", "hadeeth", "prophet", "prophetic", "sunnah",
+    "narration", "narrated", "narrator", "sahih", "bukhari", "muslim",
+    "tirmidhi", "dawud", "nasa'i", "ibn majah",
+    "حديث", "أحاديث", "نبي", "النبي", "الرسول", "رسول", "نبوي",
+    "سنة", "سنن", "رواية", "صحيح", "بخاري", "مسلم",
+}
 
-    # Tag each document with the originating sub-query for traceability
-    for doc in docs:
-        doc.metadata["sub_query"] = sub_query
+FIQH_KEYWORDS = {
+    "fiqh", "ruling", "rulings", "halal", "haram", "fatwa", "fatwas",
+    "jurisprudence", "sharia", "shariah", "madhab", "madhhab", "hanafi",
+    "maliki", "shafii", "hanbali", "wajib", "obligatory", "mustahab",
+    "recommended", "makruh", "disliked", "mubah", "permissible",
+    "forbidden", "ibadah", "worship", "muamalat", "prayer", "salah",
+    "zakat", "fasting", "hajj", "nikah", "talaq", "purification",
+    "فقه", "فقهي", "حكم", "أحكام", "حلال", "حرام", "فتوى", "فتاوى",
+    "شريعة", "مذهب", "حنفي", "مالكي", "شافعي", "حنبلي", "واجب",
+    "مستحب", "مكروه", "مباح", "صلاة", "زكاة", "صيام", "حج",
+}
 
-    return docs
+GREETINGS = {
+    "hello", "hi", "hey", "thanks", "thank you", "bye", "goodbye", "help",
+    "سلام", "السلام", "مرحبا", "أهلا", "شكرا", "وداعا", "مساعدة",
+}
 
+def tokenize(text: str) -> Set[str]:
+    text = text.lower().strip()
+    text = re.sub(r"[^\w\s\u0600-\u06FF]", " ", text)
+    return set(text.split())
 
-def dispatcher_node(state: AgentState):
+def route_sub_query(sq: str) -> List[str]:
+    """Determine which workers are relevant for a given sub-query."""
+    tokens = tokenize(sq)
+    
+    # Check for direct conversational greeting
+    if tokens & GREETINGS:
+        return ["direct_answer"]
+        
+    agents = []
+    if tokens & QURAN_KEYWORDS:
+        agents.append("quran_agent")
+    if tokens & HADITH_KEYWORDS:
+        agents.append("hadith_agent")
+    if tokens & FIQH_KEYWORDS:
+        agents.append("fiqh_agent")
+        
+    # Default to all if no keywords match
+    if not agents:
+        agents = ["quran_agent", "hadith_agent", "fiqh_agent"]
+        
+    return agents
+
+async def _run_worker_async(worker_name: str, sub_query: str) -> List[Document]:
+    """Run a worker synchronously in a separate thread using asyncio.to_thread."""
+    fn = WORKER_MAP.get(worker_name)
+    if not fn:
+        return []
+        
+    try:
+        # Wrap state matching the worker expectation
+        state = {"question": sub_query}
+        result = await asyncio.to_thread(fn, state)
+        docs = result.get("retrieved_context", [])
+        
+        # Tag documents with origin information
+        for doc in docs:
+            try:
+                doc.metadata["sub_query"] = sub_query
+                doc.metadata["worker"] = worker_name
+            except (AttributeError, TypeError):
+                pass
+        return docs
+    except Exception as e:
+        logger.error(f"Worker {worker_name} failed on '{sub_query[:30]}...': {e}")
+        return []
+
+async def dispatcher_node(state: AgentState) -> dict:
     """
-    Fan-out to multiple agents in parallel, fan-in all documents.
-
-    If sub_query_agents is populated (multi-query mode), each sub-query
-    is dispatched to its own set of agents with the sub-query as the
-    question text.  Otherwise falls back to dispatching the original
-    question to selected_agents.
+    Dispatcher Node (Phase 2):
+    Runs workers in parallel for all decomposed sub-queries using async/await.
+    Aggregates the retrieved chunks (antibodies).
     """
-    sub_query_agents = state.get("sub_query_agents", {})
-    original_agents = state.get("selected_agents", [])
-
-    if not sub_query_agents and not original_agents:
-        original_agents = ["direct_answer"]
-
-    # ── Build work items: list of (sub_query, agent_name, fn) ──
-    work_items = []
-
-    if sub_query_agents:
-        # Multi-query mode: dispatch per sub-query
-        for sub_query, agents in sub_query_agents.items():
-            for agent_name in agents:
-                fn = AGENT_MAP.get(agent_name)
-                if fn:
-                    work_items.append((sub_query, agent_name, fn))
-    else:
-        # Single-query fallback: dispatch original question to all agents
-        question = state["question"]
-        for agent_name in original_agents:
-            fn = AGENT_MAP.get(agent_name, direct_answer_node)
-            work_items.append((question, agent_name, fn))
-
-    # ── Log dispatch plan ──
-    unique_agents = sorted(set(name for _, name, _ in work_items))
-    num_sub_queries = len(sub_query_agents) if sub_query_agents else 1
-    print(f"   [Dispatcher] -> {len(work_items)} tasks across "
-          f"{num_sub_queries} sub-quer{'ies' if num_sub_queries > 1 else 'y'}, "
-          f"agents: [{', '.join(unique_agents)}]")
-
-    all_docs = []
-
-    if len(work_items) == 1:
-        # Single task — no thread overhead
-        sub_query, agent_name, fn = work_items[0]
-        all_docs = _dispatch_single(fn, state, sub_query, agent_name)
-    else:
-        # Multiple tasks — parallel execution
-        with ThreadPoolExecutor(max_workers=min(len(work_items), 6)) as executor:
-            futures = {}
-            for sub_query, agent_name, fn in work_items:
-                future = executor.submit(
-                    _dispatch_single, fn, state, sub_query, agent_name
-                )
-                futures[future] = (sub_query, agent_name)
-
-            for future in as_completed(futures):
-                sub_query, agent_name = futures[future]
-                try:
-                    docs = future.result()
-                    all_docs.extend(docs)
-                    sq_preview = sub_query[:40]
-                    print(f"   [Dispatcher] -> {agent_name} "
-                          f"('{sq_preview}...') returned {len(docs)} docs")
-                except Exception as e:
-                    print(f"   [Dispatcher] -> {agent_name} FAILED: {e}")
-
-    print(f"   [Dispatcher] -> Total documents collected: {len(all_docs)}")
-    return {"retrieved_context": all_docs}
+    sub_queries = state.get("sub_queries", [state["question"]])
+    
+    tasks = []
+    dispatch_plan = {}
+    
+    for sq in sub_queries:
+        workers = route_sub_query(sq)
+        dispatch_plan[sq] = workers
+        for w in workers:
+            tasks.append(_run_worker_async(w, sq))
+            
+    print(f"   [Dispatcher] -> Innate response: dispatching {len(tasks)} parallel workers...")
+    
+    # Execute all retrievals in parallel using async/await
+    results = await asyncio.gather(*tasks)
+    
+    # Flatten results into initial_context array
+    initial_context = []
+    for docs in results:
+        initial_context.extend(docs)
+        
+    print(f"   [Dispatcher] -> Aggregated {len(initial_context)} initial antibodies")
+    
+    return {
+        "initial_context": initial_context,
+        "loop_step": state.get("loop_step", 0) + 1
+    }

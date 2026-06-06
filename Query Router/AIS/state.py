@@ -1,16 +1,30 @@
-import operator
-from typing import TypedDict, List, Sequence, Annotated
-from langchain_core.messages import BaseMessage
+"""
+State definition for the AIS (Artificial Immune System) Query Router.
+"""
+
+from typing import TypedDict, List, Sequence
 from langchain_core.documents import Document
 
 class AgentState(TypedDict):
+    # Antigen (User Query)
     question: str
-    current_agent: str
-    selected_agents: List[str]
-    retrieved_context: List[Document]
-    reranker_score: float
-    final_answer: str
-    messages: Annotated[Sequence[BaseMessage], operator.add]
+    
+    # Innate Response
     sub_queries: List[str]
-    sub_query_agents: dict  # {"sub_query_text": ["agent_name", ...]}
+    initial_context: List[Document]
+    
+    # Adaptive Response
+    clones: List[Document]
+    matured_sub_queries: List[str]
+    secondary_context: List[Document]
+    
+    # Suppression & Synthesis
+    suppressed_context: List[Document]
+    final_answer: str
+    
+    # Cache / Memory Cell
+    cache_hit: bool
+    cached_answer: str
+    
+    # Flow management
     loop_step: int

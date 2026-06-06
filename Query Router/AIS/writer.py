@@ -1,20 +1,32 @@
+"""
+AIS Writer Node.
+
+Synthesizes the final answer using the deduplicated, matured context array (suppressed_context).
+Uses the singleton LLM loaded in models/llm_loader.py.
+"""
+
 import os
 from state import AgentState
 from models.llm_loader import get_llm
-# NOTE: PromptTemplate and StrOutputParser are imported lazily inside writer_node to avoid heavy dependencies (e.g., torch) at module load time.
-
 
 _DIR = os.path.dirname(os.path.abspath(__file__))
 
-# ==========================================
-# 1. DEFINE THE WRITER NODE
-# ==========================================
-def writer_node(state: AgentState):
+def writer_node(state: AgentState) -> dict:
+    """
+    Writer Node (Phase 4):
+    Synthesizes a response using the final suppressed_context array and the antigen (query).
+    """
     print("   [Writer] -> Synthesizing final answer...")
     query = state["question"]
-    docs = state.get("retrieved_context", [])
-
-    # Build context from all retrieved documents, preserving source info
+    
+    # Use suppressed_context if available, otherwise fallback to clones or initial_context
+    docs = state.get("suppressed_context", [])
+    if not docs:
+        docs = state.get("clones", [])
+    if not docs:
+        docs = state.get("initial_context", [])
+        
+    # Build context from documents, preserving source info
     if docs:
         context_parts = []
         for i, doc in enumerate(docs, 1):
@@ -24,17 +36,18 @@ def writer_node(state: AgentState):
     else:
         context_text = "No relevant context found in the database."
 
-    # Lazy import of LangChain classes – may fail if heavy deps (torch) are unavailable
+    # Lazy import of LangChain classes
     try:
         from langchain_core.prompts import PromptTemplate
         from langchain_core.output_parsers import StrOutputParser
         use_langchain = True
     except Exception as e:
-        print(f"[Writer] -> LangChain import failed ({e}), falling back to simple formatting.")
+        print(f"[Writer] -> LangChain import failed ({e}), using fallback context output.")
         use_langchain = False
 
-    # Load writer prompt template from file
-    with open(os.path.join(_DIR, "prompts", "writer_prompt.txt"), "r") as f:
+    # Load prompt template from prompts directory
+    prompt_path = os.path.join(_DIR, "prompts", "writer_prompt.txt")
+    with open(prompt_path, "r", encoding="utf-8") as f:
         writer_prompt = f.read()
 
     if use_langchain:
@@ -42,8 +55,6 @@ def writer_node(state: AgentState):
         chain = prompt | get_llm() | StrOutputParser()
         final_answer = chain.invoke({"context": context_text, "question": query})
     else:
-        # Fallback without LangChain: return context directly as the answer
-        # (no LLM synthesis available)
         final_answer = context_text
 
     print("   [Writer] -> Synthesis complete.")
