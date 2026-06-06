@@ -3,14 +3,6 @@ import os
 import json
 import datetime
 
-# Fix Windows console encoding for Arabic text output
-os.environ.setdefault("PYTHONIOENCODING", "utf-8")
-try:
-    sys.stdout.reconfigure(encoding="utf-8")
-    sys.stderr.reconfigure(encoding="utf-8")
-except Exception:
-    pass  # not all stdout implementations support reconfigure
-
 # Ensure Query Router directory is on sys.path so relative imports
 # (graph, state, models.*, workers.*) resolve when running from project root:
 #   python "Query Router/main.py"

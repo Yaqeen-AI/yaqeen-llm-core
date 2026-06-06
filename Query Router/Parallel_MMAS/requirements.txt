@@ -1,0 +1,15 @@
+torch
+transformers
+accelerate
+langchain
+langgraph
+langchain-core
+langchain-community
+langchain-huggingface
+sentence-transformers
+qdrant-client
+pydantic
+huggingface-hub
+python-dotenv
+bitsandbytes>=0.43.0
+requests

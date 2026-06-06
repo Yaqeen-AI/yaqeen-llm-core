@@ -1,8 +1,7 @@
 import os
 from state import AgentState
-# NOTE: llm_loader, PromptTemplate and StrOutputParser are imported lazily
-# inside writer_node to avoid triggering heavy dependencies (torch) at
-# module load time — graph.py imports this module at startup.
+from models.llm_loader import get_llm
+# NOTE: PromptTemplate and StrOutputParser are imported lazily inside writer_node to avoid heavy dependencies (e.g., torch) at module load time.
 
 
 _DIR = os.path.dirname(os.path.abspath(__file__))
@@ -35,12 +34,10 @@ def writer_node(state: AgentState):
         use_langchain = False
 
     # Load writer prompt template from file
-    with open(os.path.join(_DIR, "prompts", "writer_prompt.txt"), "r", encoding="utf-8") as f:
+    with open(os.path.join(_DIR, "prompts", "writer_prompt.txt"), "r") as f:
         writer_prompt = f.read()
 
     if use_langchain:
-        # Lazy import of LLM — only loaded when actually needed
-        from models.llm_loader import get_llm
         prompt = PromptTemplate(template=writer_prompt, input_variables=["context", "question"])
         chain = prompt | get_llm() | StrOutputParser()
         final_answer = chain.invoke({"context": context_text, "question": query})

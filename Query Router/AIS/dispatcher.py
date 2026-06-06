@@ -32,10 +32,7 @@ def _dispatch_single(fn, state: dict, sub_query: str, agent_name: str) -> list:
 
     # Tag each document with the originating sub-query for traceability
     for doc in docs:
-        try:
-            doc.metadata["sub_query"] = sub_query
-        except (AttributeError, TypeError):
-            pass  # skip if doc lacks .metadata dict
+        doc.metadata["sub_query"] = sub_query
 
     return docs
 

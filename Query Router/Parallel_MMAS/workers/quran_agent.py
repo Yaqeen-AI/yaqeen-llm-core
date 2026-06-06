@@ -1,29 +1,26 @@
+"""
+Quran Worker Agent — retrieves Quranic context via the quran_rag pipeline.
+"""
+
 import sys
 import os
 from langchain_core.documents import Document
-from state import AgentState
 
-# ---------------------------------------------------------------------------
-# Path resolution: add quran_rag root so its internal imports work
-# e.g.  from app.services.hybrid_retrieval import ...
-# ---------------------------------------------------------------------------
-_QUERY_ROUTER_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-_PROJECT_ROOT = os.path.dirname(_QUERY_ROUTER_DIR)
+# ── Path resolution ──
+_MMAS_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+_PROJECT_ROOT = os.path.dirname(_MMAS_DIR)
 _QURAN_RAG_ROOT = os.path.join(_PROJECT_ROOT, "quran_rag")
 
 if _QURAN_RAG_ROOT not in sys.path:
     sys.path.insert(0, _QURAN_RAG_ROOT)
 
-# ---------------------------------------------------------------------------
-# Lazy singleton for the heavyweight services
-# ---------------------------------------------------------------------------
+# ── Lazy singleton ──
 _generation_service = None
-_vector_store = None
 
 
 def _get_services():
     """Initialize Quran RAG services once (lazy)."""
-    global _generation_service, _vector_store
+    global _generation_service
     if _generation_service is not None:
         return _generation_service
 
@@ -34,20 +31,17 @@ def _get_services():
     from app.services.hybrid_retrieval import HybridRetrievalPipeline
     from app.services.generation_service import GenerationService
 
-    print("   [Quran Agent] -> Initializing Quran RAG services (first call)...")
+    print("   [Quran Worker] -> Initializing Quran RAG services (first call)...")
+    vs = build_vector_store()
 
-    _vector_store = build_vector_store()
     bm25 = BM25RetrievalService()
-
-    # Rebuild BM25 from stored payloads
     try:
-        texts, ids, raws, metas = _vector_store.get_all_texts_and_ids()
+        texts, ids, raws, metas = vs.get_all_texts_and_ids()
         bm25.build_index(texts=texts, chunk_ids=ids, raw_texts=raws, metadatas=metas)
     except Exception as e:
-        print(f"   [Quran Agent] -> BM25 rebuild skipped: {e}")
+        print(f"   [Quran Worker] -> BM25 rebuild skipped: {e}")
 
     embedding = EmbeddingService()
-
     try:
         reranker = RerankerService()
     except Exception:
@@ -55,46 +49,34 @@ def _get_services():
 
     pipeline = HybridRetrievalPipeline(
         embedding_service=embedding,
-        vector_store=_vector_store,
+        vector_store=vs,
         bm25_service=bm25,
         reranker_service=reranker,
     )
-
     _generation_service = GenerationService(
         retrieval_pipeline=pipeline,
-        vector_store=_vector_store,
+        vector_store=vs,
     )
-
-    print("   [Quran Agent] -> Quran RAG services ready")
+    print("   [Quran Worker] -> Quran RAG services ready")
     return _generation_service
 
 
-# ---------------------------------------------------------------------------
-# Agent node
-# ---------------------------------------------------------------------------
-
-def quran_agent_node(state: AgentState):
+def quran_agent_node(state: dict) -> dict:
     """Retrieves relevant Quranic context based on the user's question."""
     query = state["question"]
-    print(f"   [Quran Agent] -> Retrieving for: '{query[:60]}...'")
+    print(f"   [Quran Worker] -> Retrieving for: '{query[:60]}...'")
 
-    # Robust handling for missing imports and service availability
     try:
-        # Attempt to import the generation request schema
         try:
             from app.models.schemas import AnswerRequest
-        except Exception as e:
-            print(f"   [Quran Agent] -> WARNING: AnswerRequest import failed: {e}")
+        except Exception:
             AnswerRequest = None
 
         service = _get_services()
 
         if AnswerRequest is not None and getattr(service, "is_available", False):
-            # Full pipeline: retrieval + generation
             request = AnswerRequest(query=query)
             response = service.answer(request)
-
-            # ── Map AnswerCitation → list[Document] ──
             docs = []
             for c in response.citations:
                 docs.append(Document(
@@ -110,19 +92,15 @@ def quran_agent_node(state: AgentState):
                         "score": c.score,
                     },
                 ))
-
-            # If generation produced an answer but no citations, wrap it
             if not docs and getattr(response, "answer", None):
                 docs = [Document(
                     page_content=response.answer,
                     metadata={"source": "Quran RAG"},
                 )]
         else:
-            # Retrieval‑only fallback (or missing import)
             try:
                 from app.models.schemas import RetrievalRequest
-            except Exception as e:
-                print(f"   [Quran Agent] -> WARNING: RetrievalRequest import failed: {e}")
+            except Exception:
                 RetrievalRequest = None
 
             if RetrievalRequest is not None:
@@ -130,27 +108,27 @@ def quran_agent_node(state: AgentState):
                 if pipeline:
                     req = RetrievalRequest(query=query)
                     retrieval = pipeline.retrieve(req)
-                    docs = []
-                    for r in retrieval.results:
-                        docs.append(Document(
-                            page_content=r.text,
-                            metadata={
-                                "source": "Quran RAG",
-                                "surah_number": r.metadata.surah_number,
-                                "ayah_number": r.metadata.ayah_number_in_surah,
-                                "ayah_ref": r.metadata.ayah_ref,
-                                "score": r.score,
-                            },
-                        ))
+                    docs = [Document(
+                        page_content=r.text,
+                        metadata={
+                            "source": "Quran RAG",
+                            "surah_number": r.metadata.surah_number,
+                            "ayah_number": r.metadata.ayah_number_in_surah,
+                            "ayah_ref": r.metadata.ayah_ref,
+                            "score": r.score,
+                        },
+                    ) for r in retrieval.results]
                 else:
-                    docs = [Document(page_content="Quran retrieval unavailable.", metadata={"source": "Quran RAG", "error": True})]
+                    docs = [Document(page_content="Quran retrieval unavailable.",
+                                     metadata={"source": "Quran RAG", "error": True})]
             else:
-                docs = [Document(page_content="Quran agent disabled due to missing dependencies.", metadata={"source": "Quran RAG", "error": True})]
+                docs = [Document(page_content="Quran agent disabled.",
+                                 metadata={"source": "Quran RAG", "error": True})]
 
-        print(f"   [Quran Agent] -> Retrieved {len(docs)} documents")
+        print(f"   [Quran Worker] -> Retrieved {len(docs)} documents")
 
     except Exception as e:
-        print(f"   [Quran Agent] -> ERROR: {e}")
+        print(f"   [Quran Worker] -> ERROR: {e}")
         docs = [Document(
             page_content=f"Quran retrieval error: {str(e)}",
             metadata={"source": "Quran RAG", "error": True},

@@ -1,30 +1,18 @@
 import sys
 import os
-import importlib.util
 from langchain_core.documents import Document
 from state import AgentState
 
 # ---------------------------------------------------------------------------
-# Path resolution
+# Path resolution: add fiqh_rag root so its internal imports work
+# e.g.  from core.retriever import FiqhRetriever
 # ---------------------------------------------------------------------------
 _QUERY_ROUTER_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 _PROJECT_ROOT = os.path.dirname(_QUERY_ROUTER_DIR)
 _FIQH_RAG_ROOT = os.path.join(_PROJECT_ROOT, "fiqh_rag")
 
-# Add fiqh_rag to sys.path for its internal transitive imports
 if _FIQH_RAG_ROOT not in sys.path:
     sys.path.insert(0, _FIQH_RAG_ROOT)
-
-# ---------------------------------------------------------------------------
-# Explicit module loader — avoids collision with project-root `core/`
-# ---------------------------------------------------------------------------
-
-def _import_from_fiqh_rag(module_name: str, file_path: str):
-    """Import a module from fiqh_rag by explicit file path."""
-    spec = importlib.util.spec_from_file_location(module_name, file_path)
-    mod = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(mod)
-    return mod
 
 # ---------------------------------------------------------------------------
 # Lazy singleton for the retriever
@@ -36,10 +24,7 @@ def _get_retriever():
     global _retriever
     if _retriever is None:
         try:
-            # Use explicit path to avoid importing project-root core.retriever
-            retriever_path = os.path.join(_FIQH_RAG_ROOT, "core", "retriever.py")
-            retriever_mod = _import_from_fiqh_rag("fiqh_core_retriever", retriever_path)
-            FiqhRetriever = retriever_mod.FiqhRetriever
+            from core.retriever import FiqhRetriever
             print("   [Fiqh Agent] -> Initializing Fiqh retriever (first call)...")
             _retriever = FiqhRetriever()
             print("   [Fiqh Agent] -> Fiqh retriever ready")
@@ -87,9 +72,7 @@ def fiqh_agent_node(state: AgentState):
         # (calls LM Studio at localhost:1234)
         if docs:
             try:
-                generator_path = os.path.join(_FIQH_RAG_ROOT, "core", "generator.py")
-                generator_mod = _import_from_fiqh_rag("fiqh_core_generator", generator_path)
-                generate_answer = generator_mod.generate_answer
+                from core.generator import generate_answer
                 answer = generate_answer(query, results)
                 # Prepend the generated answer as the first document
                 docs.insert(0, Document(

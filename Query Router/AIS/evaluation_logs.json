@@ -1,0 +1,263 @@
+[
+  {
+    "timestamp": "2026-05-28T11:28:37.253303",
+    "original_question": "hello",
+    "sub_queries": [
+      "hello"
+    ],
+    "sub_query_agents": {
+      "hello": [
+        "direct_answer"
+      ]
+    },
+    "selected_agents": [
+      "direct_answer"
+    ],
+    "retrieved_documents_count": 1,
+    "retrieved_documents_metadata": [
+      {
+        "source": "Direct Answer",
+        "sub_query": "hello"
+      }
+    ],
+    "final_answer": "[Dummy response] text=\"You are the final synthesis agent for Yaqeen.\\nYour task is to compose a clear, comprehensive answer to the user's question using ONLY the provided context.\\n\\nRules:\\n1. If the question has multiple parts, address EACH part clearly under its own section.\\n2. Use ONLY the information from the retrieved context â€” do not hallucinate external facts.\\n3. If the context does not contain enough information for a specific part, explicitly state that.\\n4. Cite sources by referencing [Source: ...] metadata when available.\\n5. Answer in the same language the user asked in (Arabic or English).\\n6. Be concise but thorough.\\n\\nContext:\\n[1] [Source: Direct Answer]\\nThis is a general conversational query or greeting. Respond politely and directly to the user as Yaqeen, an Islamic knowledge assistant.\\n\\nUser Question: hello\\n\\nFinal Answer:\\n\""
+  },
+  {
+    "timestamp": "2026-05-28T11:39:21.773841",
+    "original_question": "hello",
+    "sub_queries": [
+      "hello"
+    ],
+    "sub_query_agents": {
+      "hello": [
+        "direct_answer"
+      ]
+    },
+    "selected_agents": [
+      "direct_answer"
+    ],
+    "retrieved_documents_count": 1,
+    "retrieved_documents_metadata": [
+      {
+        "source": "Direct Answer",
+        "sub_query": "hello"
+      }
+    ],
+    "final_answer": "[Dummy response] text=\"You are the final synthesis agent for Yaqeen.\\nYour task is to compose a clear, comprehensive answer to the user's question using ONLY the provided context.\\n\\nRules:\\n1. If the question has multiple parts, address EACH part clearly under its own section.\\n2. Use ONLY the information from the retrieved context â€” do not hallucinate external facts.\\n3. If the context does not contain enough information for a specific part, explicitly state that.\\n4. Cite sources by referencing [Source: ...] metadata when available.\\n5. Answer in the same language the user asked in (Arabic or English).\\n6. Be concise but thorough.\\n\\nContext:\\n[1] [Source: Direct Answer]\\nThis is a general conversational query or greeting. Respond politely and directly to the user as Yaqeen, an Islamic knowledge assistant.\\n\\nUser Question: hello\\n\\nFinal Answer:\\n\""
+  },
+  {
+    "timestamp": "2026-05-28T12:10:31.446612",
+    "original_question": "hello",
+    "sub_queries": [
+      "hello"
+    ],
+    "sub_query_agents": {
+      "hello": [
+        "direct_answer"
+      ]
+    },
+    "selected_agents": [
+      "direct_answer"
+    ],
+    "retrieved_documents_count": 1,
+    "retrieved_documents_metadata": [
+      {
+        "source": "Direct Answer",
+        "sub_query": "hello"
+      }
+    ],
+    "final_answer": "[Dummy response] text=\"You are the final synthesis agent for Yaqeen.\\nYour task is to compose a clear, comprehensive answer to the user's question using ONLY the provided context.\\n\\nRules:\\n1. If the question has multiple parts, address EACH part clearly under its own section.\\n2. Use ONLY the information from the retrieved context â€” do not hallucinate external facts.\\n3. If the context does not contain enough information for a specific part, explicitly state that.\\n4. Cite sources by referencing [Source: ...] metadata when available.\\n5. Answer in the same language the user asked in (Arabic or English).\\n6. Be concise but thorough.\\n\\nContext:\\n[1] [Source: Direct Answer]\\nThis is a general conversational query or greeting. Respond politely and directly to the user as Yaqeen, an Islamic knowledge assistant.\\n\\nUser Question: hello\\n\\nFinal Answer:\\n\""
+  },
+  {
+    "timestamp": "2026-05-28T12:11:03.730199",
+    "original_question": "hello",
+    "sub_queries": [
+      "hello"
+    ],
+    "sub_query_agents": {
+      "hello": [
+        "direct_answer"
+      ]
+    },
+    "selected_agents": [
+      "direct_answer"
+    ],
+    "retrieved_documents_count": 1,
+    "retrieved_documents_metadata": [
+      {
+        "source": "Direct Answer",
+        "sub_query": "hello"
+      }
+    ],
+    "final_answer": "[Dummy response] text=\"You are the final synthesis agent for Yaqeen.\\nYour task is to compose a clear, comprehensive answer to the user's question using ONLY the provided context.\\n\\nRules:\\n1. If the question has multiple parts, address EACH part clearly under its own section.\\n2. Use ONLY the information from the retrieved context â€” do not hallucinate external facts.\\n3. If the context does not contain enough information for a specific part, explicitly state that.\\n4. Cite sources by referencing [Source: ...] metadata when available.\\n5. Answer in the same language the user asked in (Arabic or English).\\n6. Be concise but thorough.\\n\\nContext:\\n[1] [Source: Direct Answer]\\nThis is a general conversational query or greeting. Respond politely and directly to the user as Yaqeen, an Islamic knowledge assistant.\\n\\nUser Question: hello\\n\\nFinal Answer:\\n\""
+  },
+  {
+    "timestamp": "2026-05-28T12:11:08.474466",
+    "original_question": "hey",
+    "sub_queries": [
+      "hey"
+    ],
+    "sub_query_agents": {
+      "hey": [
+        "direct_answer"
+      ]
+    },
+    "selected_agents": [
+      "direct_answer"
+    ],
+    "retrieved_documents_count": 1,
+    "retrieved_documents_metadata": [
+      {
+        "source": "Direct Answer",
+        "sub_query": "hey"
+      }
+    ],
+    "final_answer": "[Dummy response] text=\"You are the final synthesis agent for Yaqeen.\\nYour task is to compose a clear, comprehensive answer to the user's question using ONLY the provided context.\\n\\nRules:\\n1. If the question has multiple parts, address EACH part clearly under its own section.\\n2. Use ONLY the information from the retrieved context â€” do not hallucinate external facts.\\n3. If the context does not contain enough information for a specific part, explicitly state that.\\n4. Cite sources by referencing [Source: ...] metadata when available.\\n5. Answer in the same language the user asked in (Arabic or English).\\n6. Be concise but thorough.\\n\\nContext:\\n[1] [Source: Direct Answer]\\nThis is a general conversational query or greeting. Respond politely and directly to the user as Yaqeen, an Islamic knowledge assistant.\\n\\nUser Question: hey\\n\\nFinal Answer:\\n\""
+  },
+  {
+    "timestamp": "2026-05-28T12:11:10.564359",
+    "original_question": "hey",
+    "sub_queries": [
+      "hey"
+    ],
+    "sub_query_agents": {
+      "hey": [
+        "direct_answer"
+      ]
+    },
+    "selected_agents": [
+      "direct_answer"
+    ],
+    "retrieved_documents_count": 1,
+    "retrieved_documents_metadata": [
+      {
+        "source": "Direct Answer",
+        "sub_query": "hey"
+      }
+    ],
+    "final_answer": "[Dummy response] text=\"You are the final synthesis agent for Yaqeen.\\nYour task is to compose a clear, comprehensive answer to the user's question using ONLY the provided context.\\n\\nRules:\\n1. If the question has multiple parts, address EACH part clearly under its own section.\\n2. Use ONLY the information from the retrieved context â€” do not hallucinate external facts.\\n3. If the context does not contain enough information for a specific part, explicitly state that.\\n4. Cite sources by referencing [Source: ...] metadata when available.\\n5. Answer in the same language the user asked in (Arabic or English).\\n6. Be concise but thorough.\\n\\nContext:\\n[1] [Source: Direct Answer]\\nThis is a general conversational query or greeting. Respond politely and directly to the user as Yaqeen, an Islamic knowledge assistant.\\n\\nUser Question: hey\\n\\nFinal Answer:\\n\""
+  },
+  {
+    "timestamp": "2026-05-28T12:15:27.377297",
+    "original_question": "hello",
+    "sub_queries": [
+      "hello"
+    ],
+    "sub_query_agents": {
+      "hello": [
+        "direct_answer"
+      ]
+    },
+    "selected_agents": [
+      "direct_answer"
+    ],
+    "retrieved_documents_count": 1,
+    "retrieved_documents_metadata": [
+      {
+        "source": "Direct Answer",
+        "sub_query": "hello"
+      }
+    ],
+    "final_answer": "You are the final synthesis agent for Yaqeen.\nYour task is to compose a clear, comprehensive answer to the user's question using ONLY the provided context.\n\nRules:\n1. If the question has multiple parts, address EACH part clearly under its own section.\n2. Use ONLY the information from the retrieved context â€” do not hallucinate external facts.\n3. If the context does not contain enough information for a specific part, explicitly state that.\n4. Cite sources by referencing [Source: ...] metadata when available.\n5. Answer in the same language the user asked in (Arabic or English).\n6. Be concise but thorough.\n\nContext:\n{context}\n\nUser Question: {question}\n\nFinal Answer:\n\nContext:\n[1] [Source: Direct Answer]\nThis is a general conversational query or greeting. Respond politely and directly to the user as Yaqeen, an Islamic knowledge assistant.\nQuestion: hello\n[Answer generation skipped due to missing LangChain]"
+  },
+  {
+    "timestamp": "2026-05-28T12:16:16.857050",
+    "original_question": "hello",
+    "sub_queries": [
+      "hello"
+    ],
+    "sub_query_agents": {
+      "hello": [
+        "direct_answer"
+      ]
+    },
+    "selected_agents": [
+      "direct_answer"
+    ],
+    "retrieved_documents_count": 1,
+    "retrieved_documents_metadata": [
+      {
+        "source": "Direct Answer",
+        "sub_query": "hello"
+      }
+    ],
+    "final_answer": "[1] [Source: Direct Answer]\nThis is a general conversational query or greeting. Respond politely and directly to the user as Yaqeen, an Islamic knowledge assistant."
+  },
+  {
+    "timestamp": "2026-05-28T12:16:24.992452",
+    "original_question": "What does the Quran say about fasting?",
+    "sub_queries": [
+      "What does the Quran say about fasting?"
+    ],
+    "sub_query_agents": {
+      "What does the Quran say about fasting?": [
+        "quran_agent",
+        "fiqh_agent"
+      ]
+    },
+    "selected_agents": [
+      "quran_agent",
+      "fiqh_agent"
+    ],
+    "retrieved_documents_count": 2,
+    "retrieved_documents_metadata": [
+      {
+        "source": "Quran RAG",
+        "error": true,
+        "sub_query": "What does the Quran say about fasting?"
+      },
+      {
+        "source": "Fiqh RAG",
+        "error": true,
+        "sub_query": "What does the Quran say about fasting?"
+      }
+    ],
+    "final_answer": "[1] [Source: Quran RAG]\nQuran retrieval error: 'charmap' codec can't encode characters in position 18-19: character maps to <undefined>\n\n[2] [Source: Fiqh RAG]\nFiqh retrieval error: 'charmap' codec can't encode characters in position 19-20: character maps to <undefined>"
+  },
+  {
+    "timestamp": "2026-05-28T12:18:27.247711",
+    "original_question": "hello",
+    "sub_queries": [
+      "hello"
+    ],
+    "sub_query_agents": {
+      "hello": [
+        "direct_answer"
+      ]
+    },
+    "selected_agents": [
+      "direct_answer"
+    ],
+    "retrieved_documents_count": 1,
+    "retrieved_documents_metadata": [
+      {
+        "source": "Direct Answer",
+        "sub_query": "hello"
+      }
+    ],
+    "final_answer": "[1] [Source: Direct Answer]\nThis is a general conversational query or greeting. Respond politely and directly to the user as Yaqeen, an Islamic knowledge assistant."
+  },
+  {
+    "timestamp": "2026-05-28T12:19:23.036871",
+    "original_question": "hello",
+    "sub_queries": [
+      "hello"
+    ],
+    "sub_query_agents": {
+      "hello": [
+        "direct_answer"
+      ]
+    },
+    "selected_agents": [
+      "direct_answer"
+    ],
+    "retrieved_documents_count": 1,
+    "retrieved_documents_metadata": [
+      {
+        "source": "Direct Answer",
+        "sub_query": "hello"
+      }
+    ],
+    "final_answer": "[Dummy LLM] I'm currently running without a real language model. Please install torch and transformers for full functionality."
+  }
+]

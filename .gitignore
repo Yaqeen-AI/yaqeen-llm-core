@@ -9,7 +9,7 @@
 !/Query Router/
 
 # Within Query Router, still ignore these:
-Query Router/.env
+Query Router/**/.env
 Query Router/__pycache__/
 Query Router/**/__pycache__/
 Query Router/**/*.py[cod]

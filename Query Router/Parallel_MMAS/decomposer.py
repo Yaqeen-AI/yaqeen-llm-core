@@ -10,9 +10,7 @@ If the question is simple (single topic), it passes through unchanged.
 
 import re
 from state import AgentState
-# NOTE: This module is NOT wired into the graph — router.py handles both
-# routing and decomposition. Kept for reference / future use.
-from router import (
+from supervisor import (
     _tokenize,
     QURAN_KEYWORDS,
     HADITH_KEYWORDS,
