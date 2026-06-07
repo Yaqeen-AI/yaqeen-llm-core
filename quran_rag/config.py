@@ -32,7 +32,7 @@ class QuranRagConfig(BaseSettings):
     jina_api_key: str = Field(..., alias="JINA_API_KEY")
     jina_embedding_model: str = "jina-embeddings-v3"
     # v2-base-multilingual is faster/cheaper; swap to jina-reranker-v3 for higher recall
-    jina_reranker_model: str = "jina-reranker-v2-base-multilingual"
+    jina_reranker_model: str = "jina-reranker-v3"
 
     # ── Retrieval knobs ───────────────────────────────────────────────────────
     # How many candidates to pull from Qdrant before reranking
