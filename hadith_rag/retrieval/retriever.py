@@ -35,14 +35,30 @@ GRADE_RANK: Dict[str, int] = {g: i for i, g in enumerate(GRADE_ORDER)}
 
 
 def _grade_at_least(grade: str, min_grade: str) -> bool:
-    """Return True if grade is at least as strong as min_grade in the hierarchy."""
     return GRADE_RANK.get(grade.lower(), 99) <= GRADE_RANK.get(min_grade.lower(), 99)
 
 
 def _grades_from_min(min_grade: str) -> List[str]:
-    """Get all grades at or above min_grade in the hierarchy."""
     min_rank = GRADE_RANK.get(min_grade.lower(), 0)
     return [g for g in GRADE_ORDER if GRADE_RANK[g] <= min_rank]
+
+
+# ── Priority sources ────────────────────────────────────────────────────────
+
+PRIORITY_MOHAADETH = {"البخاري", "مسلم"}
+PRIORITY_BOOKS = {"صحيح البخاري", "صحيح مسلم"}
+PRIORITY_BOOST = 1.15  # 15% score boost for Bukhari/Muslim
+
+
+def _is_priority_source(node: NodeWithScore) -> bool:
+    """Check if node is from Bukhari or Muslim."""
+    meta = node.node.metadata
+    mohadeth = meta.get("mohadeth", "")
+    book = meta.get("book", "")
+    return (
+        mohadeth in PRIORITY_MOHAADETH
+        or book in PRIORITY_BOOKS
+    )
 
 
 # ── Config ────────────────────────────────────────────────────────────────────
@@ -67,7 +83,7 @@ class HadithRetriever:
         self._executor = ThreadPoolExecutor(max_workers=4)
 
     # ------------------------------------------------------------------
-    # Setup (call once at startup)
+    # Setup
     # ------------------------------------------------------------------
     def setup(self) -> None:
         logger.info("Initializing Hadith retriever structure...")
@@ -105,7 +121,6 @@ class HadithRetriever:
             storage_context=storage_context,
         )
 
-        # Cache the reranker — don't recreate per request!
         self._reranker = JinaRerank(
             api_key=self.cfg.jina_api_key,
             model=self.cfg.jina_reranker_model,
@@ -127,13 +142,13 @@ class HadithRetriever:
         self,
         book=None,
         grade=None,
-        min_grade=None,                    # ← NEW: hierarchy filter
+        min_grade=None,
         rawi=None,
         category=None,
         subcategory_name=None,
         mohadeth=None,
         has_explanation=None,
-        canonical_group_id=None,          # ← NEW
+        canonical_group_id=None,
     ) -> Optional[MetadataFilters]:
         filters = []
         string_filters = {
@@ -150,7 +165,6 @@ class HadithRetriever:
                 op = FilterOperator.IN if isinstance(value, list) else FilterOperator.EQ
                 filters.append(MetadataFilter(key=key, value=value, operator=op))
 
-        # NEW: Grade hierarchy — expand min_grade to all acceptable grades
         if min_grade is not None:
             acceptable = _grades_from_min(min_grade)
             filters.append(MetadataFilter(key="grade", value=acceptable, operator=FilterOperator.IN))
@@ -162,7 +176,7 @@ class HadithRetriever:
         return MetadataFilters(filters=filters, condition=FilterCondition.AND) if filters else None
 
     # ------------------------------------------------------------------
-    # Cache key — FIXED: includes skip_rerank
+    # Cache key
     # ------------------------------------------------------------------
     def _cache_key(
         self,
@@ -170,7 +184,7 @@ class HadithRetriever:
         mode: str,
         filters: Optional[MetadataFilters],
         top_k: int,
-        skip_rerank: bool,                # ← FIXED: now included
+        skip_rerank: bool,
     ) -> str:
         filter_dict = filters.dict() if filters else {}
         raw = json.dumps(
@@ -180,28 +194,21 @@ class HadithRetriever:
         return hashlib.sha256(raw.encode()).hexdigest()[:16]
 
     # ------------------------------------------------------------------
-    # NEW: Deduplicate by canonical_group_id — keep best scored per group
+    # Deduplication
     # ------------------------------------------------------------------
     def _dedup_by_canonical_group(
         self,
         nodes: List[NodeWithScore],
     ) -> List[NodeWithScore]:
-        """
-        Deduplicate results by canonical_group_id, keeping the highest-scored
-        node from each group. Preserves original order within each group.
-        """
         best_by_group: Dict[str, NodeWithScore] = {}
         
         for node in nodes:
             group_id = node.node.metadata.get("canonical_group_id")
             if group_id is None:
-                # No group ID — keep as-is (pass through)
                 continue
-            
             if group_id not in best_by_group or node.score > best_by_group[group_id].score:
                 best_by_group[group_id] = node
 
-        # Rebuild list: deduped nodes in original relative order, then ungrouped nodes
         seen_groups = set()
         result: List[NodeWithScore] = []
         
@@ -216,6 +223,39 @@ class HadithRetriever:
         return result
 
     # ------------------------------------------------------------------
+    # NEW: Priority boost for Bukhari / Muslim
+    # ------------------------------------------------------------------
+    def _apply_priority_boost(self, nodes: List[NodeWithScore]) -> List[NodeWithScore]:
+        """
+        Boost scores for Bukhari and Muslim hadiths so they rank higher.
+        Applied after retrieval and after reranking.
+        """
+        boosted = []
+        for node in nodes:
+            if _is_priority_source(node):
+                # Apply multiplicative boost
+                new_score = node.score * PRIORITY_BOOST
+                # Mark in metadata for transparency
+                new_meta = dict(node.node.metadata)
+                new_meta["priority_boosted"] = True
+                new_meta["original_score"] = node.score
+                
+                new_node = TextNode(
+                    id_=node.node.id_,
+                    text=node.node.text,
+                    metadata=new_meta,
+                    excluded_embed_metadata_keys=node.node.excluded_embed_metadata_keys,
+                    excluded_llm_metadata_keys=node.node.excluded_llm_metadata_keys,
+                )
+                boosted.append(NodeWithScore(node=new_node, score=new_score))
+            else:
+                boosted.append(node)
+
+        # Re-sort by boosted score (descending)
+        boosted.sort(key=lambda n: n.score, reverse=True)
+        return boosted
+
+    # ------------------------------------------------------------------
     # Search (async)
     # ------------------------------------------------------------------
     async def search(
@@ -224,20 +264,23 @@ class HadithRetriever:
         mode: str = "hybrid",
         book=None,
         grade=None,
-        min_grade=None,                    # ← NEW
+        min_grade=None,
         rawi=None,
         category=None,
         subcategory_name=None,
         mohadeth=None,
         has_explanation: Optional[bool] = None,
-        canonical_group_id=None,           # ← NEW
+        canonical_group_id=None,
         top_k: int = 5,
-        similarity_top_k: int = 20,        # ← agent-tunable
-        rerank_top_n: int = 10,            # ← agent-tunable
+        similarity_top_k: int = 20,
+        rerank_top_n: int = 10,
         skip_rerank: bool = False,
-        dedup_canonical: bool = True,      # ← NEW: toggle deduplication
+        dedup_canonical: bool = True,
+        prioritize_sahihayn: bool = True,   # ← NEW: toggle Bukhari/Muslim boost
     ) -> List[NodeWithScore]:
-        
+        """
+        Search with optional priority boost for Sahihayn (Bukhari & Muslim).
+        """
         mode_map = {"dense": "default", "sparse": "sparse", "hybrid": "hybrid"}
         qs_mode = mode_map.get(mode.lower(), "hybrid")
 
@@ -255,7 +298,7 @@ class HadithRetriever:
 
         # 1. Retrieve candidates
         retriever = self.index.as_retriever(
-            similarity_top_k=similarity_top_k,    # ← agent-tunable
+            similarity_top_k=similarity_top_k,
             vector_store_query_mode=qs_mode,
             filters=filters,
         )
@@ -263,25 +306,33 @@ class HadithRetriever:
         if not candidates:
             return []
 
-        # 2. NEW: Deduplicate by canonical_group_id before reranking
+        # 2. Pre-rerank boost (helps Bukhari/Muslim enter reranker window)
+        if prioritize_sahihayn:
+            candidates = self._apply_priority_boost(candidates)
+
+        # 3. Deduplicate
         if dedup_canonical:
             candidates = self._dedup_by_canonical_group(candidates)
 
-        # 3. Fast path: skip reranking
+        # 4. Fast path: skip reranking
         if skip_rerank:
             return candidates[:top_k]
 
-        # 4. Rerank — run in thread pool, agent controls output size
+        # 5. Rerank
         loop = asyncio.get_running_loop()
         reranked = await loop.run_in_executor(
             self._executor,
             self._sync_rerank,
             candidates,
             query,
-            rerank_top_n,                       # ← agent-tunable
+            rerank_top_n,
         )
 
-        # 5. Post-rerank dedup (in case reranker reordered)
+        # 6. Post-rerank boost (final elevation after cross-attention)
+        if prioritize_sahihayn:
+            reranked = self._apply_priority_boost(reranked)
+
+        # 7. Final dedup
         if dedup_canonical:
             reranked = self._dedup_by_canonical_group(reranked)
 
@@ -291,9 +342,8 @@ class HadithRetriever:
         self,
         candidates: List[NodeWithScore],
         query: str,
-        top_n: int,                             # ← agent-tunable
+        top_n: int,
     ) -> List[NodeWithScore]:
-        """Synchronous wrapper so it can be pushed to a thread pool."""
         return self._reranker.postprocess_nodes(
             nodes=candidates,
             query_bundle=QueryBundle(query_str=query),
@@ -304,7 +354,6 @@ class HadithRetriever:
     # Cleanup
     # ------------------------------------------------------------------
     def shutdown(self) -> None:
-        """Graceful shutdown — call during app teardown."""
         self._executor.shutdown(wait=True)
         logger.info("Hadith retriever shut down.")
 
