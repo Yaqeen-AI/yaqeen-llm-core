@@ -36,7 +36,7 @@ def inspector_node(state: AgentState) -> dict:
     # Try to load reranker lazily
     reranker = None
     try:
-        from models.reranker import reranker
+        from shared_nodes.models.reranker import reranker
     except Exception as e:
         logger.warning(f"Failed to import local reranker: {e}")
 

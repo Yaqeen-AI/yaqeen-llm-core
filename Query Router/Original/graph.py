@@ -2,11 +2,11 @@ from langgraph.graph import StateGraph, START, END
 from state import AgentState
 
 # Import nodes
-from router import router_node
+from shared_nodes.router import router_node
 from dispatcher import dispatcher_node
 from inspector import inspector_node
-from compressor import compression_node
-from writer import writer_node
+from shared_nodes.compressor import compression_node
+from shared_nodes.writer import writer_node
 
 workflow = StateGraph(AgentState)
 

@@ -23,8 +23,8 @@ from state import AgentState
 from manager import manager_node
 from dispatcher import dispatcher_node
 from inspector import inspector_node
-from compressor import compression_node
-from writer import writer_node
+from shared_nodes.compressor import compression_node
+from shared_nodes.writer import writer_node
 
 # Lazy cache singleton
 _cache = None

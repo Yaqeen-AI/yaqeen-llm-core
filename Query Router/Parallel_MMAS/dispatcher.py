@@ -20,7 +20,7 @@ from synchronizer import synchronize_colonies
 from workers.quran_agent import quran_agent_node
 from workers.hadith_agent import hadith_agent_node
 from workers.fiqh_agent import fiqh_agent_node
-from workers.direct_answer import direct_answer_node
+from shared_nodes.workers.direct_answer import direct_answer_node
 
 logger = logging.getLogger("mmas.dispatcher")
 

@@ -12,7 +12,7 @@ def inspector_node(state: AgentState):
     """
     # Try to import reranker lazily – if torch or its DLLs are missing we simply skip reranking
     try:
-        from models.reranker import reranker
+        from shared_nodes.models.reranker import reranker
     except Exception as e:
         print(f"   [Inspector] -> Reranker unavailable ({e}), skipping rerank step.")
         # Return docs unchanged

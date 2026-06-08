@@ -3,7 +3,7 @@ import os
 os.environ["PYTHONIOENCODING"] = "utf-8"
 sys.stdout.reconfigure(encoding='utf-8')
 sys.path.insert(0, "Query Router")
-from router import router_node, _split_query, _route_tokens, _tokenize
+from shared_nodes.router import router_node, _split_query, _route_tokens, _tokenize
 
 print("=== Import OK ===\n")
 
