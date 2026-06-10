@@ -22,7 +22,7 @@ from llama_index.core.schema import NodeWithScore
 from langgraph.graph import END, START, StateGraph
 
 from core.arabic_utils import detect_mazhabs, detect_fiqh_topic
-from core.llamaindex_retriever import FiqhLlamaRetriever
+from fiqh_rag.core.retriever import FiqhLlamaRetriever
 
 
 class FiqhRAGState(TypedDict):

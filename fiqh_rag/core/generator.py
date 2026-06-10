@@ -18,7 +18,7 @@ from llama_index.core.llms import (
 )
 
 from core.config import GEMINI_MODEL, GOOGLE_API_KEY, MAX_OUTPUT_TOKENS
-from core.retriever import Result
+from fiqh_rag.core.retriever_helper import Result
 
 
 # ---------------------------------------------------------------------------

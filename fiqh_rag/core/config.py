@@ -14,9 +14,11 @@ EMBED_DIM         = 1024
 GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY", "")
 GEMINI_MODEL   = os.getenv("GEMINI_MODEL", "gemma-3-27b-it")
 
-# --- Qdrant (local file storage) ---
+# --- Qdrant (local file storage & remote web fallbacks) ---
 QDRANT_PATH     = str(Path(__file__).parent.parent / "qdrant_storage")
-COLLECTION_NAME = "fiqh"
+FIQH_QDRANT_URL = os.getenv("FIQH_QDRANT_URL", os.getenv("QDRANT_URL", ""))
+FIQH_QDRANT_API_KEY = os.getenv("FIQH_QDRANT_API_KEY", os.getenv("QDRANT_API_KEY", ""))
+COLLECTION_NAME = os.getenv("FIQH_COLLECTION_NAME", os.getenv("COLLECTION_NAME", "fiqh_hybrid_v1"))
 
 # --- Data paths ---
 DATA_DIR        = Path(__file__).parent.parent / "fiqh_data"
@@ -51,13 +53,13 @@ def _gpu_available() -> bool:
         return False
 
 
-BM25_USE_GPU = _gpu_available()
+BM25_USE_GPU = os.getenv("BM25_USE_GPU", "1" if _gpu_available() else "0").lower() in ("1", "true")
 
 EMBED_DEVICE       = "cuda" if BM25_USE_GPU else "cpu"
 LOCAL_EMBED_MODEL  = "jinaai/jina-embeddings-v3"
 LOCAL_RERANK_MODEL = "jinaai/jina-reranker-v2-base-multilingual"
-USE_LOCAL_EMBED    = os.getenv("USE_LOCAL_EMBED",  "1" if BM25_USE_GPU else "0") == "1"
-USE_LOCAL_RERANK   = os.getenv("USE_LOCAL_RERANK", "1" if BM25_USE_GPU else "0") == "1"
+USE_LOCAL_EMBED    = os.getenv("USE_LOCAL_EMBED",  "0") == "1"
+USE_LOCAL_RERANK   = os.getenv("USE_LOCAL_RERANK", "0") == "1"
 
 # --- Two-Tier Cache ---
 REDIS_HOST        = os.getenv("REDIS_HOST", "localhost")

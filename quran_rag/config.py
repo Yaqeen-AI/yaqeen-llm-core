@@ -13,20 +13,21 @@ from __future__ import annotations
 
 from functools import lru_cache
 
-from pydantic import Field
+from pydantic import Field, AliasChoices
 from pydantic_settings import BaseSettings
 
 
 class QuranRagConfig(BaseSettings):
     # ── Qdrant ────────────────────────────────────────────────────────────────
-    qdrant_url: str = Field(..., alias="QDRANT_URL")
-    qdrant_api_key: str = Field(..., alias="QDRANT_API_KEY")
+    qdrant_url: str = Field(..., validation_alias=AliasChoices("QURAN_QDRANT_URL", "QDRANT_URL"))
+    qdrant_api_key: str = Field(..., validation_alias=AliasChoices("QURAN_QDRANT_API_KEY", "QDRANT_API_KEY"))
     quran_collection_name: str = Field(
-        "quranic_rag_1024d_int8", alias="QURAN_COLLECTION_NAME"
+        "quranic_rag_1024d_int8", validation_alias=AliasChoices("QURAN_COLLECTION_NAME", "QDRANT_COLLECTION_NAME")
     )
     dense_vector_name: str = "text-dense"
     sparse_vector_name: str = "text-sparse"
     embedding_dimensions: int = 1024
+    text_key: str = "text" 
 
     # ── Jina API ──────────────────────────────────────────────────────────────
     jina_api_key: str = Field(..., alias="JINA_API_KEY")

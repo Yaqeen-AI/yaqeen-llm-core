@@ -72,6 +72,7 @@ class HadithRagConfig(NamedTuple):
     jina_reranker_model: str = "jina-reranker-v3"
     retrieval_top_k: int = 8
     rerank_top_n: int = 5
+    enable_hybrid: bool = False
 
 
 class HadithRetriever:
@@ -111,7 +112,7 @@ class HadithRetriever:
             client=sync_client,
             aclient=async_client,
             collection_name=self.cfg.hadith_collection_name,
-            enable_hybrid=False,
+            enable_hybrid=self.cfg.enable_hybrid,  # 🔥 FIX 2: Pass the flag dynamically from config
             text_key="document",
         )
 
@@ -128,7 +129,7 @@ class HadithRetriever:
         )
 
         logger.info(f"Hadith retriever ready — connected to: {self.cfg.hadith_collection_name}")
-
+        
     @property
     def index(self) -> VectorStoreIndex:
         if self._index is None:
@@ -344,10 +345,10 @@ class HadithRetriever:
         query: str,
         top_n: int,
     ) -> List[NodeWithScore]:
+        self._reranker.top_n = top_n
         return self._reranker.postprocess_nodes(
             nodes=candidates,
             query_bundle=QueryBundle(query_str=query),
-            top_n=top_n,
         )
 
     # ------------------------------------------------------------------

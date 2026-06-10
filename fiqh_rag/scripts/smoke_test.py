@@ -245,7 +245,7 @@ def evaluate_query(
     t0 = time.perf_counter()
     try:
         from core.graph import fiqh_graph
-        from core.llamaindex_retriever import nodes_to_results
+        from fiqh_rag.core.retriever import nodes_to_results
         state   = fiqh_graph.invoke({"query": question})
         results = nodes_to_results(state["documents"])
         qr.retrieval_latency = time.perf_counter() - t0

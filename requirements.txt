@@ -1,0 +1,40 @@
+# ============================================================
+# Yaqeen AI Multi-Agent RAG System Dependencies
+# ============================================================
+
+# --- Core Framework / API ---
+fastapi>=0.111.0
+uvicorn[standard]>=0.29.0
+python-dotenv>=1.0.0
+pydantic>=2.7.0
+pydantic-settings>=2.0.0
+
+# --- Vector Database & Indexes ---
+qdrant-client>=1.18.0
+chromadb>=0.5.0
+
+# --- LLM Providers ---
+google-genai>=1.0.0
+google-generativeai>=0.8.0
+
+# --- LlamaIndex (Quran/Fiqh/Hadith Integrations) ---
+llama-index-core>=0.11.0
+llama-index-embeddings-jinaai>=0.2.0
+llama-index-postprocessor-jinaai-rerank>=0.2.0
+llama-index-vector-stores-qdrant>=0.2.0
+
+# --- Text Processing & Machine Learning ---
+emoji>=2.10.0
+regex>=2024.5.15
+pyarabic>=0.6.15
+rank-bm25>=0.2.2
+scikit-learn>=1.3.0
+pandas>=2.0.0
+numpy>=1.24.0
+
+# --- Redis (Semantic Caching) ---
+redis>=5.0.3
+
+# --- External Requests ---
+httpx>=0.27.0
+requests>=2.31.0

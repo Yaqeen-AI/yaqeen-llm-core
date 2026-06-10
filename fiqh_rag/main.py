@@ -16,7 +16,7 @@ from llama_index.core import Settings
 from core.embeddings import JinaEmbedding
 from core.generator import GeminiLLM, generate_answer
 from core.graph import fiqh_graph
-from core.llamaindex_retriever import nodes_to_results
+from fiqh_rag.core.retriever import nodes_to_results
 from core.cache import TwoTierCache
 
 Settings.embed_model = JinaEmbedding()
