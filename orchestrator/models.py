@@ -15,7 +15,7 @@ class RagSource(StrEnum):
 class Citation(BaseModel):
     source: RagSource
     label: str
-    metadata: dict[str, Any] = Field(default_factory=dict, exclude=True, repr=False)
+    metadata: dict[str, Any] = Field(default_factory=dict)
 
 
 class RetrievedDocument(BaseModel):
@@ -119,4 +119,4 @@ class AskResponse(BaseModel):
     follow_up_questions: list[str] = Field(default_factory=list)
     sources: list[RagSource] = Field(default_factory=list)
     cache_hit: bool = False
-    metadata: dict[str, Any] = Field(default_factory=dict, exclude=True, repr=False)
+    metadata: dict[str, Any] = Field(default_factory=dict)

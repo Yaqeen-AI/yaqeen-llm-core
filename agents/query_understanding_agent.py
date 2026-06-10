@@ -99,17 +99,14 @@ _FIQH_WORDS = (
 _EXPLANATION_WORDS = ("اشرح", "شرح", "فسر", "تفسير", "معنى", "المعنى", "الدلالة", "الحكمة", "فوائد")
 _SUMMARY_WORDS = ("لخص", "ملخص", "خلاصة", "باختصار", "نظرة عامة", "قصة", "قصه", "overview", "summary")
 _STORY_WORDS = ("قصة", "قصه", "story", "حكاية", "رحلة", "سيرة")
-_COMPARISON_WORDS = ("قارن", "مقارنة", "الفرق", "بين", "compare", "difference")
+_COMPARISON_WORDS = ("قارن", "مقارنة", "الفرق بين", "compare", "difference")
 
 
 class QueryUnderstandingAgent(Agent):
     async def run(self, query: str) -> QueryUnderstanding:
         try:
-            understanding = await self._structured_json(
-                SYSTEM_PROMPT,
-                json.dumps({"query": query}, ensure_ascii=False),
-                QueryUnderstanding,
-            )
+            payload = await self.llm.generate_json(SYSTEM_PROMPT, json.dumps({"query": query}, ensure_ascii=False))
+            understanding = QueryUnderstanding.model_validate(_coerce_understanding_payload(payload))
         except Exception:
             understanding = QueryUnderstanding(language="ar" if _looks_arabic(query) else "unknown", confidence=0.0)
         return _stabilize_understanding(query, understanding)
@@ -208,6 +205,32 @@ def _stabilize_understanding(query: str, understanding: QueryUnderstanding) -> Q
             "confidence": min(confidence, 1.0),
         }
     )
+
+
+def _coerce_understanding_payload(payload: dict) -> dict:
+    coerced = dict(payload or {})
+    if isinstance(coerced.get("retrieval_notes"), str):
+        coerced["retrieval_notes"] = [coerced["retrieval_notes"]]
+    elif coerced.get("retrieval_notes") is None:
+        coerced["retrieval_notes"] = []
+
+    if not isinstance(coerced.get("key_concepts"), list):
+        value = coerced.get("key_concepts")
+        coerced["key_concepts"] = [str(value)] if value else []
+
+    entities = coerced.get("named_entities")
+    if not isinstance(entities, dict):
+        coerced["named_entities"] = {}
+    else:
+        coerced["named_entities"] = {
+            str(key): value if isinstance(value, list) else [str(value)]
+            for key, value in entities.items()
+            if value not in (None, "", [], {})
+        }
+
+    if not isinstance(coerced.get("requested_references"), dict):
+        coerced["requested_references"] = {}
+    return coerced
 
 
 def _contains_any(text: str, needles: tuple[str, ...]) -> bool:

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 from typing import Any
 
 from agents.base import Agent
@@ -21,14 +22,21 @@ Grounding constraints:
 5. Never expose internal metadata, retrieval settings, scores, cache state, or routing details.
 6. You may use provided compact metadata to understand context, ordering, edition, topic, ayah range, narrator,
    source, grade, and fiqh topic. Do not print metadata as raw JSON.
+7. Respect evidence source boundaries:
+   - Only write a Quran section or say "الأدلة من القرآن" when at least one evidence item has source="quran".
+   - If a hadith or fiqh source quotes a Quranic ayah internally, cite it as that hadith/fiqh evidence item, not
+     as Quran evidence.
+   - Do not force coverage of Quran, Hadith, and Fiqh. Use only the source types that genuinely support the answer.
+   - Exception: if the user explicitly asks for a source type and evidence items from that source type are present,
+     you must use and cite at least one relevant item from that source type.
 
-Answer structure:
-- Use short Arabic section headings when the response is Arabic, or short English headings when the query is English.
-- Prefer this shape when relevant:
-  1. "الخلاصة" / "Summary": direct answer in 2-4 sentences.
-  2. Evidence sections grouped by source: "الأدلة من القرآن", "الأحاديث", "البيان الفقهي".
-  3. "وجه الدلالة" / "How the evidence supports the answer": concise synthesis.
-- Do not make a decorative or verbose outline for very small answers; keep it readable and structured.
+Answer style:
+- Choose the answer shape dynamically from the user's question and the retrieved evidence.
+- Do not use a fixed template. Do not always start with "الخلاصة" or "Summary".
+- Use headings only when they make the answer easier to read. If the answer is simple, write a direct paragraph.
+- If several sources are genuinely used, you may group by those used sources only. If only one or two citations are needed, keep it compact.
+- The first sentence should answer the user's actual question directly when the evidence supports it.
+- Keep the tone natural and scholarly, not mechanical.
 
 Hadith-specific requirements:
 - For every Hadith evidence item used, include a compact structured entry:
@@ -44,7 +52,7 @@ Hadith-specific requirements:
 
 Json Structure: Return a valid JSON object with:
 - "answer": the structured text response.
-- "citations": an array of citation objects used in your response; include source and label only.
+- "citations": an array of citation objects used in your response. Use the exact source and label from evidence.
 - "follow_up_questions": 2 to 3 closely related follow-up questions grounded in the retrieved source domains."""
 
 _MAX_TEXT_CHARS = int(os.getenv("YAQEEN_GENERATION_DOC_CHAR_LIMIT", "4200"))
@@ -126,13 +134,16 @@ class GenerationAgent(Agent):
             evidence_items.append(item)
 
         source_counts = _source_counts(evidence_items)
+        requested_sources = _requested_sources(original_query)
         payload = {
             "original_query": original_query,
             "rewritten_query": rewrite.rewritten_query,
             "source_queries": rewrite.source_queries,
             "source_counts": source_counts,
+            "requested_sources": requested_sources,
             "answer_format": {
-                "structured": True,
+                "adaptive_structure": True,
+                "avoid_fixed_template": True,
                 "hide_metadata": True,
                 "use_metadata_for_context": True,
                 "hadith_entries_need_explanation": "hadith" in source_counts,
@@ -141,16 +152,32 @@ class GenerationAgent(Agent):
             },
             "evidence": evidence_items,
         }
-        return await self._structured_json(
-            _build_system_prompt(original_query, evidence_items),
+        raw_generated = await self.llm.generate_json(
+            _build_system_prompt(original_query, evidence_items, requested_sources),
             json.dumps(payload, ensure_ascii=False),
-            GeneratedAnswer,
         )
+        generated = GeneratedAnswer.model_validate(_coerce_generated_payload(raw_generated, evidence_items))
+        return generated.model_copy(update={"answer": _clean_generated_answer(generated.answer, source_counts)})
 
 
-def _build_system_prompt(original_query: str, evidence_items: list[dict[str, Any]]) -> str:
+def _build_system_prompt(original_query: str, evidence_items: list[dict[str, Any]], requested_sources: list[str] | None = None) -> str:
     sources = _source_counts(evidence_items)
+    requested_sources = requested_sources or _requested_sources(original_query)
     additions: list[str] = []
+    required_available = [source for source in requested_sources if source in sources]
+    required_missing = [source for source in requested_sources if source not in sources]
+    if required_available:
+        additions.append(
+            "Coverage requirement: the user explicitly requested these source types and evidence is available for them: "
+            + ", ".join(required_available)
+            + ". Use and cite at least one relevant evidence item from each of these source types."
+        )
+    if required_missing:
+        additions.append(
+            "Missing requested source warning: the user requested these source types, but no evidence items from them are available: "
+            + ", ".join(required_missing)
+            + ". State this limitation briefly instead of inventing evidence."
+        )
     if "quran" in sources:
         additions.append(
             """Quran generation policy:
@@ -159,6 +186,8 @@ def _build_system_prompt(original_query: str, evidence_items: list[dict[str, Any
 - When multiple chunks share a surah/theme, synthesize them together instead of treating each chunk as unrelated.
 - Mention tafsir edition naturally only when it matters (e.g. concise Jalalayn vs detailed Ibn Kathir context)."""
         )
+    else:
+        additions.append('No evidence item has source="quran"; do not create a Quran evidence section.')
     if "hadith" in sources:
         additions.append(
             """Hadith generation policy:
@@ -173,9 +202,9 @@ def _build_system_prompt(original_query: str, evidence_items: list[dict[str, Any
 - Distinguish direct textual evidence from juristic explanation and conditions."""
         )
     if _looks_arabic(original_query):
-        additions.append("Use Arabic headings and concise Arabic prose. Avoid English unless the evidence label is English.")
+        additions.append("Use natural Arabic prose. Add Arabic headings only when they help; do not force a fixed heading set.")
     else:
-        additions.append("Use English headings and concise English prose unless the evidence itself must be quoted in Arabic.")
+        additions.append("Use natural English prose. Add English headings only when they help; do not force a fixed heading set.")
 
     return f"{BASE_SYSTEM_PROMPT}\n\nDynamic context for this answer:\n" + "\n\n".join(additions)
 
@@ -198,6 +227,35 @@ def _compact_metadata(source: str, metadata: dict[str, Any]) -> dict[str, Any]:
     return compact
 
 
+def _coerce_generated_payload(payload: dict[str, Any], evidence_items: list[dict[str, Any]]) -> dict[str, Any]:
+    coerced = dict(payload or {})
+    coerced["answer"] = str(coerced.get("answer") or "").strip()
+
+    if not isinstance(coerced.get("follow_up_questions"), list):
+        value = coerced.get("follow_up_questions")
+        coerced["follow_up_questions"] = [str(value)] if value else []
+
+    evidence_citations_by_label = {
+        item.get("citation_label"): item.get("citation")
+        for item in evidence_items
+        if item.get("citation_label") and isinstance(item.get("citation"), dict)
+    }
+    citations: list[dict[str, Any]] = []
+    for citation in coerced.get("citations") or []:
+        if isinstance(citation, dict):
+            label = citation.get("label")
+            if label in evidence_citations_by_label:
+                citations.append(evidence_citations_by_label[label])
+            elif citation.get("source") and label:
+                citations.append(citation)
+        elif isinstance(citation, str):
+            matched = evidence_citations_by_label.get(citation)
+            if matched:
+                citations.append(matched)
+    coerced["citations"] = citations
+    return coerced
+
+
 def _source_counts(evidence_items: list[dict[str, Any]]) -> dict[str, int]:
     counts: dict[str, int] = {}
     for item in evidence_items:
@@ -215,3 +273,38 @@ def _truncate(text: str, limit: int) -> str:
 
 def _looks_arabic(text: str) -> bool:
     return any("\u0600" <= char <= "\u06FF" for char in text)
+
+
+def _requested_sources(query: str) -> list[str]:
+    text = (query or "").casefold()
+    sources: list[str] = []
+    if any(term in text for term in ("قرآن", "القرآن", "آية", "ايات", "آيات", "quran", "ayah", "verse")):
+        sources.append("quran")
+    if any(term in text for term in ("حديث", "الأحاديث", "احاديث", "السنة", "sunnah", "hadith")):
+        sources.append("hadith")
+    if any(term in text for term in ("حكم", "فقه", "الفقه", "قول الفقهاء", "أقوال الفقهاء", "ruling", "fiqh")):
+        sources.append("fiqh")
+    return _dedupe_strings(sources)
+
+
+def _dedupe_strings(values: list[str]) -> list[str]:
+    seen: set[str] = set()
+    result: list[str] = []
+    for value in values:
+        if value in seen:
+            continue
+        result.append(value)
+        seen.add(value)
+    return result
+
+
+def _clean_generated_answer(answer: str, source_counts: dict[str, int]) -> str:
+    cleaned = re.sub(r"^\s*(?:الخلاصة|خلاصة|Summary)\s*[:：]\s*", "", answer or "").strip()
+    if "quran" not in source_counts:
+        cleaned = re.sub(
+            r"(?:^|\n\n)الأدلة من القرآن\s*[:：]\s*.*?(?=\n\n(?:الأحاديث|البيان الفقهي|الدليل|الحكم|التفصيل|Hadith|Fiqh)\s*[:：]|\Z)",
+            "",
+            cleaned,
+            flags=re.DOTALL,
+        ).strip()
+    return cleaned

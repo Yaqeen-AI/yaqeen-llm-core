@@ -42,10 +42,43 @@ class AggregationAgent:
             key=lambda doc: (doc.normalized_score, doc.score),
             reverse=True,
         )
-        return AggregatedEvidence(documents=ranked[:final_top_k])
+        return AggregatedEvidence(documents=_balanced_top_k(ranked, final_top_k))
 
 
 def _document_signature(document: RetrievedDocument) -> str:
     citation = document.citation.label if document.citation else ""
     raw = f"{document.source}:{citation}:{document.text[:300]}"
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+
+def _balanced_top_k(ranked: list[RetrievedDocument], final_top_k: int) -> list[RetrievedDocument]:
+    sources = []
+    seen_sources: set[RagSource] = set()
+    for document in ranked:
+        if document.source in seen_sources:
+            continue
+        sources.append(document.source)
+        seen_sources.add(document.source)
+
+    if len(sources) <= 1:
+        return ranked[:final_top_k]
+
+    selected: list[RetrievedDocument] = []
+    selected_ids: set[str] = set()
+    per_source_floor = 2 if final_top_k >= len(sources) * 2 else 1
+
+    for source in sources:
+        source_docs = [document for document in ranked if document.source == source]
+        for document in source_docs[:per_source_floor]:
+            selected.append(document)
+            selected_ids.add(document.id)
+
+    for document in ranked:
+        if len(selected) >= final_top_k:
+            break
+        if document.id in selected_ids:
+            continue
+        selected.append(document)
+        selected_ids.add(document.id)
+
+    return selected[:final_top_k]

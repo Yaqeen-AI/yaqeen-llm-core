@@ -153,7 +153,7 @@ def _quran_config(
             filters[key] = refs[key]
     filters.pop("is_parent", None)
     filters.pop("prefer_child", None)
-    filters["include_parent_context"] = True
+    filters["include_parent_context"] = depth in {"expanded", "survey"}
     filters["edition"] = _select_quran_edition(filters.get("edition"), rewrite, understanding, depth)
 
     if depth == "pinpoint":
@@ -249,7 +249,7 @@ def _depth(rewrite: QueryRewrite, understanding: QueryUnderstanding | None) -> s
             depth = "focused"
         if understanding.query_scope in {"narrative", "broad_theme"} and depth in {"pinpoint", "focused"}:
             return "expanded"
-        if understanding.query_scope in {"comparative", "ruling"} and depth != "survey":
+        if understanding.query_scope == "comparative" and depth != "survey":
             return "expanded"
         return depth
     if _AYAH_REF_RE.search(text):

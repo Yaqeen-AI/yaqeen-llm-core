@@ -14,12 +14,13 @@ from agents import (
     RetrievalConfigurationAgent,
 )
 from cache.semantic_cache import SemanticCache
-from orchestrator.models import AskResponse, RagSource, RetrievedDocument
+from orchestrator.models import AskResponse, Citation, RagSource, RetrievedDocument
 from orchestrator.state import WorkflowState
 from rag_adapters import FiqhAdapter, HadithAdapter, QuranAdapter, RagAdapter
 
 logger = logging.getLogger(__name__)
 _CACHE_CHECK_TIMEOUT_SECONDS = float(os.getenv("YAQEEN_CACHE_CHECK_TIMEOUT_SECONDS", "1.2"))
+_RETRIEVAL_CONCURRENCY = max(1, int(os.getenv("YAQEEN_RETRIEVAL_CONCURRENCY", "1")))
 
 
 class MultiAgentRagWorkflow:
@@ -85,13 +86,14 @@ class MultiAgentRagWorkflow:
         final_top_k = state.retrieval_plan.final_top_k if state.retrieval_plan else 8
         state.evidence = await self.aggregation_agent.run(state.retrieved_documents, final_top_k=final_top_k)
         state.generated = await self.generation_agent.run(query, state.rewrite, state.evidence)
-        citations = await self.citation_agent.run(state.evidence.documents)
+        evidence_citations = await self.citation_agent.run(state.evidence.documents)
+        citations = _final_citations(state.generated.answer, evidence_citations)
 
         response = AskResponse(
             answer=state.generated.answer,
-            citations=state.generated.citations or citations,
+            citations=citations,
             follow_up_questions=state.generated.follow_up_questions,
-            sources=state.selection.selected_sources,
+            sources=_sources_from_citations(citations),
             cache_hit=False,
             metadata={
                 "route_type": state.selection.route_type,
@@ -110,6 +112,7 @@ class MultiAgentRagWorkflow:
         assert state.retrieval_plan is not None
 
         tasks = []
+        semaphore = asyncio.Semaphore(_RETRIEVAL_CONCURRENCY)
         logger.debug(
             "Retrieval plan configs: keys=%s",
             list(state.retrieval_plan.configs.keys()),
@@ -120,7 +123,7 @@ class MultiAgentRagWorkflow:
             if adapter is None or config is None:
                 logger.warning("Skipping %s because adapter or retrieval config is missing.", source)
                 continue
-            tasks.append(adapter.retrieve(_query_for_source(state, source), config))
+            tasks.append(_retrieve_with_limit(semaphore, source, adapter, _query_for_source(state, source), config))
 
         if not tasks:
             return []
@@ -165,3 +168,37 @@ def _query_for_source(state: WorkflowState, source: RagSource) -> str:
     if source_query:
         return source_query
     return state.rewrite.expanded_query or state.rewrite.rewritten_query or state.original_query
+
+
+async def _retrieve_with_limit(semaphore: asyncio.Semaphore, source: RagSource, adapter: RagAdapter, query: str, config) -> list[RetrievedDocument]:
+    async with semaphore:
+        logger.debug("Retrieving %s with top_k=%s sim_k=%s", source, config.top_k, config.similarity_top_k)
+        return await adapter.retrieve(query, config)
+
+
+def _final_citations(answer: str, evidence_citations: list[Citation]) -> list[Citation]:
+    in_answer = [citation for citation in evidence_citations if citation.label and citation.label in answer]
+    return _dedupe_citations(in_answer or evidence_citations)
+
+
+def _sources_from_citations(citations: list[Citation]) -> list[RagSource]:
+    sources: list[RagSource] = []
+    seen: set[RagSource] = set()
+    for citation in citations:
+        if citation.source in seen:
+            continue
+        sources.append(citation.source)
+        seen.add(citation.source)
+    return sources
+
+
+def _dedupe_citations(citations: list[Citation]) -> list[Citation]:
+    deduped: list[Citation] = []
+    seen: set[tuple[RagSource, str]] = set()
+    for citation in citations:
+        key = (citation.source, citation.label)
+        if key in seen:
+            continue
+        deduped.append(citation)
+        seen.add(key)
+    return deduped
