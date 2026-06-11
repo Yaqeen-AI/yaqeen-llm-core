@@ -111,7 +111,7 @@ class GeneratedAnswer(BaseModel):
 
 class AskRequest(BaseModel):
     query: str = Field(..., min_length=2, max_length=2000)
-
+    sources: list[RagSource] | None = Field(default=None, min_length=1, max_length=3)
 
 class AskResponse(BaseModel):
     answer: str
