@@ -14,7 +14,7 @@ from agents import (
     RetrievalConfigurationAgent,
 )
 from cache.semantic_cache import SemanticCache
-from orchestrator.models import AskResponse, Citation, RagSource, RetrievedDocument
+from orchestrator.models import AskResponse, Citation, RagSelection, RagSource, RetrievedDocument
 from orchestrator.state import WorkflowState
 from rag_adapters import FiqhAdapter, HadithAdapter, QuranAdapter, RagAdapter
 
@@ -50,10 +50,12 @@ class MultiAgentRagWorkflow:
             RagSource.FIQH: FiqhAdapter(),
         }
 
-    async def ask(self, query: str) -> AskResponse:
+    async def ask(self, query: str, sources: list[RagSource] | None = None) -> AskResponse:
         state = WorkflowState(original_query=query)
+        requested_sources = _dedupe_sources(sources or [])
+        cache_key = _cache_key(query, requested_sources)
 
-        cached = await self._check_cache_safe(query)
+        cached = await self._check_cache_safe(cache_key)
         if cached.hit and cached.response:
             state.cache_hit = True
             state.cached_response = cached.response.model_copy(
@@ -67,7 +69,15 @@ class MultiAgentRagWorkflow:
         state.understanding = await self.query_understanding_agent.run(query)
         state.rewrite = await self.query_rewriter_agent.run(query, state.understanding)
         state.normalized_query = state.rewrite.normalized_query
-        state.selection = await self.rag_selector_agent.run(query, state.understanding, state.rewrite)
+        if requested_sources:
+            state.selection = RagSelection(
+                selected_sources=requested_sources,
+                route_type="single_source" if len(requested_sources) == 1 else "multi_source",
+                confidence="high",
+                reason="Source scope requested by the API client.",
+            )
+        else:
+            state.selection = await self.rag_selector_agent.run(query, state.understanding, state.rewrite)
 
         if state.selection.route_type == "out_of_scope" or not state.selection.selected_sources:
             response = AskResponse(
@@ -103,7 +113,7 @@ class MultiAgentRagWorkflow:
             },
         )
         state.response = response
-        asyncio.create_task(self._store_cache_safe(query, response))
+        asyncio.create_task(self._store_cache_safe(cache_key, response))
         return response
 
     async def _retrieve_parallel(self, state: WorkflowState) -> list[RetrievedDocument]:
@@ -202,3 +212,21 @@ def _dedupe_citations(citations: list[Citation]) -> list[Citation]:
         deduped.append(citation)
         seen.add(key)
     return deduped
+
+
+def _dedupe_sources(sources: list[RagSource]) -> list[RagSource]:
+    deduped: list[RagSource] = []
+    seen: set[RagSource] = set()
+    for source in sources:
+        if source in seen:
+            continue
+        deduped.append(source)
+        seen.add(source)
+    return deduped
+
+
+def _cache_key(query: str, sources: list[RagSource]) -> str:
+    if not sources:
+        return query
+    source_scope = ",".join(source.value for source in sources)
+    return f"{query}\n\n[source_scope:{source_scope}]"
