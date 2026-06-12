@@ -1,0 +1,2 @@
+﻿source,questions_evaluated,recall_at_5_mean,mrr_mean,ndcg_at_5_mean,citation_accuracy_mean,retrieved_chunks_accuracy_mean,latency_p95_ms,rate_limit_wait_p95_ms,missing_relevance_count,missing_citation_truth_count,llm_judged_count,errors
+fiqh,15,0.9077,0.8846,0.88,0.9231,0.7654,1840.86,0.04,2,2,13,0

@@ -59,6 +59,7 @@ _ARABIC_DIACRITICS = re.compile(r"[\u0610-\u061A\u064B-\u065F\u0670\u06D6-\u06ED
 _QURAN_EXPANSION_TERMS = ("تفسير", "معنى", "آيات", "سورة", "موضوع", "هداية", "دلالة", "سبب النزول")
 _HADITH_EXPANSION_TERMS = ("حديث", "رواية", "شرح الحديث", "الراوي", "المصدر", "درجة الحديث", "صحيح")
 _FIQH_EXPANSION_TERMS = ("حكم", "فقه", "شروط", "أقوال الفقهاء", "المذاهب", "دليل")
+_TOPIC_EXPANSIONS: dict[str, dict[str, tuple[str, ...]]] = {}
 
 
 class QueryRewriterAgent(Agent):
@@ -119,6 +120,7 @@ def _stabilize_rewrite(query: str, understanding: QueryUnderstanding, rewrite: Q
             rewritten,
             expanded,
             quran_terms,
+            _topic_terms(normalized, "quran"),
             quran_expansion_terms,
         )
     if understanding.domain in {"hadith", "multi"}:
@@ -127,6 +129,7 @@ def _stabilize_rewrite(query: str, understanding: QueryUnderstanding, rewrite: Q
             rewritten,
             expanded,
             hadith_terms,
+            _topic_terms(normalized, "hadith"),
             _HADITH_EXPANSION_TERMS if understanding.wants_explanation or understanding.evidence_need in {"hadith_grade", "mixed"} else (),
         )
     if understanding.domain in {"fiqh", "multi"}:
@@ -135,6 +138,7 @@ def _stabilize_rewrite(query: str, understanding: QueryUnderstanding, rewrite: Q
             rewritten,
             expanded,
             fiqh_terms,
+            _topic_terms(normalized, "fiqh"),
             _FIQH_EXPANSION_TERMS,
         )
 
@@ -243,6 +247,14 @@ def _dedupe(values: list[object]) -> list[str]:
         result.append(clean)
         seen.add(clean)
     return result
+
+
+def _topic_terms(normalized_query: str, source: str) -> list[str]:
+    terms: list[str] = []
+    for trigger, by_source in _TOPIC_EXPANSIONS.items():
+        if trigger in normalized_query:
+            terms.extend(by_source.get(source, []))
+    return terms
 
 
 def _use_llm_query_rewrite() -> bool:

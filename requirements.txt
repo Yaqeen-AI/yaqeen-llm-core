@@ -31,6 +31,7 @@ rank-bm25>=0.2.2
 scikit-learn>=1.3.0
 pandas>=2.0.0
 numpy>=1.24.0
+openpyxl>=3.1.0
 
 # --- Redis (Semantic Caching) ---
 redis>=5.0.3

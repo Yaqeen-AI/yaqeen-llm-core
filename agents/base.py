@@ -4,14 +4,46 @@ import asyncio
 import json
 import logging
 import os
+import re
 from abc import ABC, abstractmethod
+from math import ceil
 from typing import Any, Protocol, TypeVar
 
 from pydantic import BaseModel, ValidationError
 
+from utils.rate_limits import AsyncSlidingWindowRateLimiter
+
 logger = logging.getLogger(__name__)
 
 T = TypeVar("T", bound=BaseModel)
+
+_GEMINI_RATE_LIMIT_ENABLED = os.getenv("GEMINI_RATE_LIMIT_ENABLED", "true").strip().lower() not in {"0", "false", "no"}
+_GEMINI_RATE_LIMIT_SAFETY = float(os.getenv("GEMINI_RATE_LIMIT_SAFETY", "0.9"))
+_GEMINI_RPM_LIMIT = max(1, int(float(os.getenv("GEMINI_RPM_LIMIT", "15")) * _GEMINI_RATE_LIMIT_SAFETY))
+_GEMINI_TPM_LIMIT = max(1, int(float(os.getenv("GEMINI_TPM_LIMIT", "250000")) * _GEMINI_RATE_LIMIT_SAFETY))
+_GEMINI_RPD_LIMIT = max(1, int(float(os.getenv("GEMINI_RPD_LIMIT", "500")) * _GEMINI_RATE_LIMIT_SAFETY))
+_GEMINI_TOKEN_CHARS_PER_TOKEN = max(1.0, float(os.getenv("GEMINI_TOKEN_CHARS_PER_TOKEN", "3.0")))
+_GEMINI_RESPONSE_TOKEN_RESERVE = max(0, int(os.getenv("GEMINI_RESPONSE_TOKEN_RESERVE", "2048")))
+_GEMINI_RETRY_BUFFER_SECONDS = float(os.getenv("GEMINI_RETRY_BUFFER_SECONDS", "2.0"))
+
+_GEMINI_RPM_LIMITER = AsyncSlidingWindowRateLimiter(
+    limit=_GEMINI_RPM_LIMIT,
+    window_seconds=60,
+    name="gemini-rpm",
+    enabled=_GEMINI_RATE_LIMIT_ENABLED,
+)
+_GEMINI_TPM_LIMITER = AsyncSlidingWindowRateLimiter(
+    limit=_GEMINI_TPM_LIMIT,
+    window_seconds=60,
+    name="gemini-tpm",
+    enabled=_GEMINI_RATE_LIMIT_ENABLED,
+)
+_GEMINI_RPD_LIMITER = AsyncSlidingWindowRateLimiter(
+    limit=_GEMINI_RPD_LIMIT,
+    window_seconds=24 * 60 * 60,
+    name="gemini-rpd",
+    enabled=_GEMINI_RATE_LIMIT_ENABLED,
+)
 
 
 class LLMClient(Protocol):
@@ -33,6 +65,7 @@ class GeminiLLMClient:
     async def generate_json(self, system: str, user: str) -> dict[str, Any]:
         if not self.api_key:
             raise RuntimeError("GEMINI_API_KEY or GOOGLE_API_KEY is required for agent reasoning.")
+        await _acquire_gemini_budget(system, user)
         text = await asyncio.to_thread(self._generate_sync, system, user)
         return _parse_json_object(text)
 
@@ -71,14 +104,43 @@ class GeminiLLMClient:
                     return getattr(response, "text", "{}") or "{}"
                 except Exception as e:
                     last_exception = e
-                    time.sleep(2 ** attempt)  # Exponential backoff
+                    retry_delay = _retry_delay_seconds(str(e))
+                    time.sleep(retry_delay if retry_delay is not None else 2 ** attempt)
             except Exception as e:
                 import time
                 last_exception = e
-                time.sleep(2 ** attempt)
+                retry_delay = _retry_delay_seconds(str(e))
+                time.sleep(retry_delay if retry_delay is not None else 2 ** attempt)
                 
         logger.error("GeminiLLMClient failed after %d attempts. Last error: %s", max_retries, last_exception)
         return "{}"
+
+
+async def _acquire_gemini_budget(system: str, user: str) -> None:
+    estimated_tokens = _estimate_gemini_tokens(system, user)
+    await _GEMINI_RPD_LIMITER.acquire(1)
+    await _GEMINI_RPM_LIMITER.acquire(1)
+    await _GEMINI_TPM_LIMITER.acquire(estimated_tokens)
+
+
+def _estimate_gemini_tokens(system: str, user: str) -> int:
+    prompt_chars = len(system or "") + len(user or "")
+    prompt_tokens = ceil(prompt_chars / _GEMINI_TOKEN_CHARS_PER_TOKEN)
+    return max(1, prompt_tokens + _GEMINI_RESPONSE_TOKEN_RESERVE)
+
+
+def _retry_delay_seconds(message: str) -> float | None:
+    retry_match = re.search(r"retryDelay['\"]?\s*:\s*['\"](?P<delay>\d+(?:\.\d+)?)s", message)
+    if retry_match:
+        return float(retry_match.group("delay")) + _GEMINI_RETRY_BUFFER_SECONDS
+
+    please_retry_match = re.search(r"retry in (?P<delay>\d+(?:\.\d+)?)s", message, flags=re.IGNORECASE)
+    if please_retry_match:
+        return float(please_retry_match.group("delay")) + _GEMINI_RETRY_BUFFER_SECONDS
+
+    if "429" in message or "RESOURCE_EXHAUSTED" in message:
+        return 60 + _GEMINI_RETRY_BUFFER_SECONDS
+    return None
 
 
 def _parse_json_object(text: str) -> dict[str, Any]:
@@ -119,4 +181,3 @@ class Agent(ABC):
     @abstractmethod
     async def run(self, *args: Any, **kwargs: Any) -> Any:
         raise NotImplementedError
-
